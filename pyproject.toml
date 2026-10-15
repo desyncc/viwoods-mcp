@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viwoods-mcp"
+version = "0.1.0"
+description = "The Viwoods AiPaper's Paper notebooks over MCP, behind a folder allow/deny list"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = ["mcp>=2.3", "pillow>=10.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+viwoods-mcp = "viwoods_mcp.server:main"
+
+[tool.setuptools]
+packages = ["viwoods_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to ~/.config/viwoods-mcp/policy.json, or use: viwoods-mcp allow Health. A rule is a folder path; it covers that folder, the folders under it and a notebook by title. Deny wins over allow; anything no rule allows is not shared.",
+  "allow": ["Health", "Reference/Recipes"],
+  "deny": ["Health/Private"],
+  "write": false
+}
