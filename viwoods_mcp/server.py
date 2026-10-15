@@ -24,7 +24,7 @@ from .adb import AdbError, Device
 from .paper import Notebook, PaperApp, PaperError
 from .policy import POLICY_FILE, Policy, apply_rule, notebook_path
 
-# paperd's ink index (optional): search_handwriting reads the text it recognised from your pages.
+# paperd's ink index (optional): viwoods_search_handwriting reads the text it recognised from your pages.
 INDEX = Path(os.environ.get("VIWOODS_MCP_INDEX")
              or Path.home() / ".local/share/paper-console/index.db")
 MAX_PAGES = 8                      # pages per read_pages call
@@ -193,20 +193,20 @@ def build():
     srv = MCPServer("viwoods", instructions=INSTRUCTIONS)
 
     @srv.tool()
-    async def list_folders() -> str:
-        """The folders of shared notebooks, with how many notebooks each holds, and how many
-        notebooks are not shared (a count only)."""
+    async def viwoods_list_folders() -> str:
+        """The Viwoods tablet's Paper app: its folders of shared notebooks, with how many notebooks
+        each holds, and how many notebooks are not shared (a count only). Not Nextcloud folders."""
         return json.dumps(await _api().folders(), ensure_ascii=False)
 
     @srv.tool()
-    async def list_notebooks(folder: str = "") -> str:
-        """Shared notebooks, newest first: id, title, folder, page count and which pages have
+    async def viwoods_list_notebooks(folder: str = "") -> str:
+        """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page count and which pages have
         writing. `folder` limits it to a folder (and the folders under it)."""
         return json.dumps(await _api().notebooks(folder), ensure_ascii=False)
 
     @srv.tool()
-    async def read_pages(notebook: str, pages: list[int]) -> list:
-        """Pages of a shared notebook as images, to read the handwriting. `notebook` is its title or
+    async def viwoods_read_pages(notebook: str, pages: list[int]) -> list:
+        """Pages of a shared Viwoods Paper notebook as images, to read the handwriting. `notebook` is its title or
         id; `pages` are positions (1 = first), at most 8 per call."""
         try:
             meta, images = await _api().read_pages(notebook, pages)
@@ -220,15 +220,15 @@ def build():
         return blocks
 
     @srv.tool()
-    async def search_handwriting(query: str, limit: int = 10) -> str:
-        """Find words in the handwriting of shared notebooks (the text paperd's index read from the
+    async def viwoods_search_handwriting(query: str, limit: int = 10) -> str:
+        """Find words in the handwriting of shared Viwoods Paper notebooks (the text paperd's index read from the
         pages; it needs paperd's index file (VIWOODS_MCP_INDEX) and covers pages it has read). Returns the notebook,
         page and a snippet."""
         return json.dumps(await _api().search(query, limit), ensure_ascii=False)
 
     @srv.tool()
-    async def add_pdf_notebook(pdf_path: str, title: str, folder: str = "") -> str:
-        """Put a PDF from this PC on the tablet as a new notebook to write on, into a shared top
+    async def viwoods_add_pdf_notebook(pdf_path: str, title: str, folder: str = "") -> str:
+        """Put a PDF from this PC on the Viwoods tablet as a new Paper notebook to write on, into a shared top
         level `folder` (or the top level). Only when the user has switched writing on."""
         try:
             return json.dumps(await _api().add_pdf(pdf_path, title, folder), ensure_ascii=False)
@@ -270,7 +270,7 @@ def main(argv: list[str] | None = None) -> None:
     for name in ("allow", "deny", "remove"):
         p = sub.add_parser(name, help=f"{name} folder paths in the policy file")
         p.add_argument("rules", nargs="+", metavar="FOLDER")
-    w = sub.add_parser("write", help="switch writing (add_pdf_notebook) on or off")
+    w = sub.add_parser("write", help="switch writing (viwoods_add_pdf_notebook) on or off")
     w.add_argument("state", choices=["on", "off"])
     sub.add_parser("policy", help="show the policy and what it shares (reads the tablet)")
     args = ap.parse_args(argv)

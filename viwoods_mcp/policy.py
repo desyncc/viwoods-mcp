@@ -26,7 +26,7 @@ def _parts(rule: str) -> list[str]:
 class Policy:
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
-    write: bool = False            # may add_pdf_notebook put a PDF on the tablet (into an allowed folder)
+    write: bool = False            # may viwoods_add_pdf_notebook put a PDF on the tablet (into an allowed folder)
 
     @staticmethod
     def covers(rule: str, path: list[str]) -> bool:

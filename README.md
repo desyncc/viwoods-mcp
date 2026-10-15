@@ -24,11 +24,11 @@ viwoods-mcp policy        # what that shares, folder by folder
 
 | Tool | What it does |
 |---|---|
-| `list_folders` | The folders of shared notebooks with counts, and how many notebooks are *not* shared (a number only) |
-| `list_notebooks` | Shared notebooks: id, title, folder, page count, and which pages have writing |
-| `read_pages` | Pages of a shared notebook as images (up to 8 per call) |
-| `search_handwriting` | Words found in the handwriting of shared notebooks (needs paperd's index, see below) |
-| `add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
+| `viwoods_list_folders` | The folders of shared notebooks with counts, and how many notebooks are *not* shared (a number only) |
+| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, and which pages have writing |
+| `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
+| `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks (needs paperd's index, see below) |
+| `viwoods_add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
 
 ---
 
@@ -96,7 +96,7 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 |---|---|
 | `allow` | Folder paths Claude may see |
 | `deny` | Folder paths it may not. **Deny always wins over allow** |
-| `write` | Lets `add_pdf_notebook` put a PDF on the tablet, into an allowed folder. Off by default |
+| `write` | Lets `viwoods_add_pdf_notebook` put a PDF on the tablet, into an allowed folder. Off by default |
 
 **How a rule matches:**
 
@@ -111,7 +111,7 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 |---|---|
 | `VIWOODS_MCP_POLICY` | Path to the policy file |
 | `VIWOODS_MCP_SERIAL` | adb serial, or `host:port` for Wi-Fi |
-| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `search_handwriting` |
+| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` |
 
 ---
 
@@ -123,7 +123,7 @@ viwoods-mcp allow Health         # add an allow rule
 viwoods-mcp deny Journals        # add a deny rule
 viwoods-mcp remove Journals      # drop a rule from either list
 viwoods-mcp policy               # show the policy and what it shares
-viwoods-mcp write on             # let add_pdf_notebook put PDFs on the tablet
+viwoods-mcp write on             # let viwoods_add_pdf_notebook put PDFs on the tablet
 viwoods-mcp write off
 ```
 
@@ -136,9 +136,9 @@ Rules can be edited by hand in the policy file too.
 - **The notebook tree** comes from the Paper app's own content provider (`FileInfoProvider`), which the ordinary adb `shell` user can query. **The pages** are read from the app's folder under `/sdcard/Android/data`, which that user can read as well. That's why it needs no root.
 - **If the provider answers nothing**, it snapshots the app's Room database instead. That path needs `adb root`.
 - **Hidden notebooks stay hidden.** Encrypted, recycle-bin, deleted and PDF-template notebooks never reach the tools.
-- **Not probe-able.** Asking for a notebook that isn't shared gets the same "no shared notebook called…" answer as asking for one that was never there, in `read_pages` and in search.
-- **`add_pdf_notebook`** uses the app's own PDF import: the PDF is pushed to `/sdcard/Documents/viwoods-mcp/` and has to stay there, because the app keeps its path rather than a copy.
-- **`search_handwriting`** reads the text paperd's ink index recognised from your pages (the `ink_pages` table in its `index.db`). Without that file it simply returns nothing.
+- **Not probe-able.** Asking for a notebook that isn't shared gets the same "no shared notebook called…" answer as asking for one that was never there, in `viwoods_read_pages` and in search.
+- **`viwoods_add_pdf_notebook`** uses the app's own PDF import: the PDF is pushed to `/sdcard/Documents/viwoods-mcp/` and has to stay there, because the app keeps its path rather than a copy.
+- **`viwoods_search_handwriting`** reads the text paperd's ink index recognised from your pages (the `ink_pages` table in its `index.db`). Without that file it simply returns nothing.
 
 Checked on an AiPaper (SE03) with firmware 3.15.x and Paper app 1.8.9. A different firmware may move things around; the provider authority and the page-file layout are the two places to look.
 
