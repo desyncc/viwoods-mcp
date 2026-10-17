@@ -19,7 +19,8 @@ viwoods-mcp policy        # what that shares, folder by folder
 - **🔒 A folder allow/deny list.** One small file decides what Claude can see. Nothing is shared until you add a rule, deny always beats allow, and a notebook you haven't shared doesn't exist as far as Claude can tell.
 - **🪶 No root.** It reads the tablet with plain `adb`, through the Paper app's own content provider and its page files. If the provider says nothing it falls back to a database snapshot, and that part needs `adb root`.
 - **👀 Claude can read your handwriting.** Pages come back as images, so it reads the ink itself rather than a lossy OCR pass.
-- **🔎 Optional handwriting search**, if you also run [paperd](https://github.com/desyncc/paper-console)'s ink index.
+- **🔎 Optional handwriting search**, if you also run [paperd](https://github.com/desyncc/paper-console)'s ink index. Every hit comes with a precise reference (`Journals › 2026-04-07 · p. 3 · changed 2026-04-07`) and a count of how many matches there were in all.
+- **🖼️ Show me where I wrote it.** `viwoods_show_match` crops the page to the words you asked about, outlined and enlarged, using the word boxes in paperd's index. The crop is also saved on your PC and can be opened in your image viewer.
 - **✍️ Optional PDF import**, off by default: put a PDF on the tablet as a notebook to write on, into a folder you've shared.
 
 | Tool | What it does |
@@ -28,6 +29,7 @@ viwoods-mcp policy        # what that shares, folder by folder
 | `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when it last changed |
 | `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
 | `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks (needs paperd's index, see below) |
+| `viwoods_show_match` | A page zoomed in on where some words are written (up to 3 spots, outlined in red), saved to your PC. Needs paperd's index |
 | `viwoods_add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
 
 ---
@@ -112,7 +114,9 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 |---|---|
 | `VIWOODS_MCP_POLICY` | Path to the policy file |
 | `VIWOODS_MCP_SERIAL` | adb serial, or `host:port` for Wi-Fi |
-| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` |
+| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` and `viwoods_show_match` |
+| `VIWOODS_MCP_OPEN_IMAGES` | `1` opens each crop from `viwoods_show_match` in your default image viewer. Off by default, so no window appears unasked |
+| `VIWOODS_MCP_CROP_DIR` | Where those crops are saved (default `~/.cache/viwoods-mcp/crops`; private to you, the newest 50 are kept) |
 
 ---
 
@@ -139,11 +143,14 @@ Rules can be edited by hand in the policy file too.
 - **Hidden notebooks stay hidden.** Encrypted, recycle-bin, deleted and PDF-template notebooks never reach the tools.
 - **Not probe-able.** Asking for a notebook that isn't shared gets the same "no shared notebook called…" answer as asking for one that was never there, in `viwoods_read_pages` and in search.
 - **`viwoods_add_pdf_notebook`** uses the app's own PDF import: the PDF is pushed to `/sdcard/Documents/viwoods-mcp/` and has to stay there, because the app keeps its path rather than a copy.
+- **`viwoods_show_match`** finds the words in the word boxes paperd's index stores (`[word, x0, y0, x1, y1]`, in the page image's own pixels), groups them into spots, and crops each with some of the writing around it. Whether the chat window displays the image depends on the Claude app, which is why it's also saved to disk and can be opened for you.
 - **`viwoods_search_handwriting`** reads the text paperd's ink index recognised from your pages (the `ink_pages` table in its `index.db`). Without that file it simply returns nothing.
 
 Checked on an AiPaper (SE03) with firmware 3.15.x and Paper app 1.8.9. A different firmware may move things around; the provider authority and the page-file layout are the two places to look.
 
 ### What it won't do
+
+Crops saved by `viwoods_show_match` are pieces of your pages kept in a folder only you can read; delete the folder whenever you like.
 
 It doesn't rename, delete, tag or move notebooks (the app offers no safe route for any of that), and it never touches the notebook lock or the app's other controls. Reading a page sends that page's image to whichever Claude you connected, so what you allow is what it can see. Allow carefully.
 

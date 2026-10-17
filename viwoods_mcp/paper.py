@@ -175,24 +175,39 @@ class PaperApp:
         return books
 
     # -- pictures
-    async def png(self, page: Page) -> bytes:
-        """The page as an RGB PNG, flattened onto white and no larger than MAX_EDGE."""
+    async def _raw(self, page: Page) -> bytes:
         name = page.shot or page.ink
         if not name:
             raise PaperError(f"page {page.n} has nothing written on it")
-        raw = await self._run("exec-out", f"cat {shlex.quote(f'{FILES}/{page.user}/{name}')}")
-        return await asyncio.to_thread(_flatten, raw)
+        return await self._run("exec-out", f"cat {shlex.quote(f'{FILES}/{page.user}/{name}')}")
+
+    async def png(self, page: Page) -> bytes:
+        """The page as an RGB PNG, flattened onto white and no larger than MAX_EDGE."""
+        return await asyncio.to_thread(_flatten, await self._raw(page))
+
+    async def image(self, page: Page) -> Image.Image:
+        """The page as an RGB image at the size the app stored it, flattened onto white."""
+        return await asyncio.to_thread(_open, await self._raw(page))
 
 
-def _flatten(raw: bytes) -> bytes:
+def _open(raw: bytes) -> Image.Image:
     img = Image.open(io.BytesIO(raw))
     img.load()
     if img.mode in ("RGBA", "LA", "P"):
         img = img.convert("RGBA")
         img = Image.alpha_composite(Image.new("RGBA", img.size, (255, 255, 255, 255)), img)
-    img = img.convert("RGB")
-    if max(img.size) > MAX_EDGE:
-        img.thumbnail((MAX_EDGE, MAX_EDGE), Image.LANCZOS)
+    return img.convert("RGB")
+
+
+def to_png(img: Image.Image, edge: int = MAX_EDGE) -> bytes:
+    """`img` as PNG bytes, shrunk to fit `edge` on its longer side (never enlarged)."""
+    if max(img.size) > edge:
+        img = img.copy()
+        img.thumbnail((edge, edge), Image.LANCZOS)
     out = io.BytesIO()
     img.save(out, "PNG", optimize=True)
     return out.getvalue()
+
+
+def _flatten(raw: bytes) -> bytes:
+    return to_png(_open(raw))

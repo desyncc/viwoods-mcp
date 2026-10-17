@@ -1,11 +1,14 @@
 """The allow/deny policy and what each tool is allowed to see."""
 
 import asyncio
+import io
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from viwoods_mcp import paper as paper_mod
 from viwoods_mcp import server as V
@@ -41,6 +44,10 @@ class FakePaper:
     async def png(self, page):
         self.read.append(page.id)
         return b"PNG:" + page.id.encode()
+
+    async def image(self, page):
+        self.read.append(page.id)
+        return Image.new("RGB", (1800, 2400), "white")
 
 
 def run(coro):
@@ -188,7 +195,8 @@ def test_policy_edits_apply_to_the_next_call_without_a_restart(tmp_path):
 def make_index(path, rows):
     con = sqlite3.connect(path)
     con.execute("create table ink_pages(src, nb, page, h, ts, title, status, tries, engine, text, boxes)")
-    con.executemany("insert into ink_pages values ('stock',?,?,'h',1,'t','done',0,'e',?,'[]')", rows)
+    con.executemany("insert into ink_pages values ('stock',?,?,'h',1,'t','done',0,'e',?,?)",
+                    [(*r, "[]") if len(r) == 3 else r for r in rows])
     con.commit()
     con.close()
 
@@ -199,14 +207,14 @@ def test_search_drops_hits_in_notebooks_that_are_not_shared(tmp_path):
                      ("j1", "j1-p1", "the blue door in my dream"),
                      ("h3", "h3-p1", "blue feelings I keep to myself")])
     a = api(Policy(allow=["Health", "Journals"], deny=["Journals", "Health/Private"]), index=idx)
-    hits = run(a.search("blue"))
+    hits = run(a.search("blue"))["results"]
     assert [h["notebook"] for h in hits] == ["Meds"] and hits[0]["page"] == 1
     assert "pills" in hits[0]["text"]
-    assert run(a.search("")) == [] and run(api(Policy(allow=["*"]), index=tmp_path / "none").search("x")) == []
+    assert run(a.search(""))["results"] == [] and run(api(Policy(allow=["*"]), index=tmp_path / "none").search("x"))["results"] == []
     # a % or _ in the query is text, not a wildcard
     make_index(tmp_path / "i2.db", [("h1", "h1-p1", "100% sure"), ("h1", "h1-p2", "no match")])
-    assert len(run(api(Policy(allow=["*"]), index=tmp_path / "i2.db").search("100%"))) == 1
-    assert run(api(Policy(allow=["*"]), index=tmp_path / "i2.db").search("%")) != []
+    assert len(run(api(Policy(allow=["*"]), index=tmp_path / "i2.db").search("100%"))["results"]) == 1
+    assert run(api(Policy(allow=["*"]), index=tmp_path / "i2.db").search("%"))["results"] != []
 
 
 def test_adding_a_pdf_needs_writing_on_an_allowed_folder_and_a_real_pdf(tmp_path, monkeypatch):
@@ -265,9 +273,9 @@ def test_a_page_the_tablet_would_not_give_up_is_not_reported_as_blank():
 def test_search_finds_non_ascii_text_whatever_its_case(tmp_path):
     make_index(tmp_path / "i.db", [("h1", "h1-p1", "Über die Straße gehen"), ("h1", "h1-p2", "ÉCOLE du soir")])
     a = api(Policy(allow=["*"]), index=tmp_path / "i.db")
-    assert [h["page"] for h in run(a.search("über"))] == [1]
-    assert [h["page"] for h in run(a.search("École"))] == [2]
-    assert [h["page"] for h in run(a.search("ÜBER"))] == [1]
+    assert [h["page"] for h in run(a.search("über"))["results"]] == [1]
+    assert [h["page"] for h in run(a.search("École"))["results"]] == [2]
+    assert [h["page"] for h in run(a.search("ÜBER"))["results"]] == [1]
 
 
 def test_unshared_notebooks_cannot_crowd_shared_ones_out_of_the_results(tmp_path):
@@ -279,14 +287,14 @@ def test_unshared_notebooks_cannot_crowd_shared_ones_out_of_the_results(tmp_path
     con.commit()
     con.close()
     a = api(Policy(allow=["*"], deny=["Journals"]), index=idx)
-    assert [h["notebook"] for h in run(a.search("blue"))] == ["Meds"]
+    assert [h["notebook"] for h in run(a.search("blue"))["results"]] == ["Meds"]
 
 
 def test_search_limit_is_at_least_one_and_at_most_the_cap(tmp_path):
     make_index(tmp_path / "i.db", [("h1", f"h1-p{i % 2 + 1}", f"blue {i}") for i in range(30)])
     a = api(Policy(allow=["*"]), index=tmp_path / "i.db")
-    assert len(run(a.search("blue", 0))) == 1 and len(run(a.search("blue", -5))) == 1
-    assert len(run(a.search("blue", 3))) == 3 and len(run(a.search("blue", 500))) == V.MAX_RESULTS
+    assert len(run(a.search("blue", 0))["results"]) == 1 and len(run(a.search("blue", -5))["results"]) == 1
+    assert len(run(a.search("blue", 3))["results"]) == 3 and len(run(a.search("blue", 500))["results"]) == V.MAX_RESULTS
 
 
 def test_snippets_say_when_they_are_cut():
@@ -295,7 +303,7 @@ def test_snippets_say_when_they_are_cut():
     import tempfile, pathlib
     d = pathlib.Path(tempfile.mkdtemp())
     make_index(d / "i.db", make(long) + [("h1", "h1-p2", "blue")])
-    hits = run(api(Policy(allow=["*"]), index=d / "i.db").search("blue"))
+    hits = run(api(Policy(allow=["*"]), index=d / "i.db").search("blue"))["results"]
     by_page = {h["page"]: h["text"] for h in hits}
     assert by_page[1].startswith("…") and by_page[1].endswith("…") and by_page[2] == "blue"
 
@@ -324,3 +332,99 @@ def test_the_tools_report_expected_failures_as_errors_with_their_message(monkeyp
     assert [c.type for c in blocks] == ["text", "text", "image"]
     with pytest.raises(ToolError, match="index isn't there"):
         run(srv.call_tool("viwoods_search_handwriting", {"query": "x"}))
+
+
+# ---------------------------------------------------------------- citations, counts and the zoomed crop
+
+def test_a_reference_names_the_folder_notebook_page_and_date():
+    book = nb("c1", "Dad Notes", "Journals/2026")
+    assert V.cite(book, 3) == f"Journals › 2026 › Dad Notes · p. 3 · changed {V.when(book.modified)[:10]}"
+    assert V.cite(nb("c2", "Scratch", "")).startswith("Scratch · changed ")           # top level, no page
+
+
+def test_search_hits_carry_references_and_say_how_many_there_were_in_all(tmp_path):
+    rows = [("h1", "h1-p1", f"blue {i}") for i in range(7)] + [("j1", "j1-p1", "blue hidden")]
+    make_index(tmp_path / "i.db", rows)
+    a = api(Policy(allow=["*"], deny=["Journals"]), index=tmp_path / "i.db")
+    found = run(a.search("blue", 3))
+    assert found["total_matches"] == 7 and found["shown"] == 3 and len(found["results"]) == 3   # hidden not counted
+    assert found["results"][0]["reference"].startswith("Health › Meds · p. 1 · changed ")
+    assert "Showing 3 of 7" in found["note"]
+    everything = run(a.search("blue", 20))
+    assert everything["total_matches"] == everything["shown"] == 7 and "note" not in everything
+    assert run(a.search("nothing like this")) == {"total_matches": 0, "shown": 0, "results": []}
+
+
+def test_read_pages_images_are_captioned_with_their_reference():
+    meta, images = run(api(Policy(allow=["Health"])).read_pages("Meds", [1, 2]))
+    assert list(meta["references"]) == [1] and meta["references"][1].startswith("Health › Meds · p. 1")
+
+
+WORDS = [("I", 100, 100, 130, 160), ("feel", 140, 100, 260, 160), ("anxious", 270, 100, 500, 160),
+         ("tonight", 510, 100, 700, 160), ("later", 100, 1500, 260, 1560), ("anxiety", 270, 1500, 460, 1560)]
+
+
+def crop_api(tmp_path, books=BOOKS, policy=None, opened=None, **kw):
+    boxes = json.dumps([list(w) for w in WORDS])
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "I feel anxious tonight", boxes)])
+    async def record(path):
+        opened.append(path)
+    return api(policy or Policy(allow=["*"], deny=["Journals"]), books, index=tmp_path / "i.db",
+               crop_dir=tmp_path / "crops", open_image=record if opened is not None else None, **kw)
+
+
+def test_show_match_crops_each_place_the_words_are_written_and_saves_them_privately(tmp_path):
+    a = crop_api(tmp_path)
+    meta, shots = run(a.show_match("Meds", 1, "anxi"))
+    assert meta["matched_words"] == 2 and meta["spots_on_page"] == 2 and meta["shown"] == 2 == len(shots)
+    assert meta["reference"].startswith("Health › Meds · p. 1")
+    saved = [Path(p) for p in meta["saved"]]
+    assert [p.read_bytes() for p in saved] == shots
+    assert oct(saved[0].parent.stat().st_mode)[-3:] == "700" and oct(saved[0].stat().st_mode)[-3:] == "600"
+    assert Image.open(io.BytesIO(shots[0])).width > 700
+
+
+def test_show_match_opens_the_crops_only_when_that_is_switched_on(tmp_path):
+    (tmp_path / "off").mkdir()
+    (tmp_path / "on").mkdir()
+    assert run(crop_api(tmp_path / "off").show_match("Meds", 1, "anxious"))[0]["shown"] == 1   # open_image is None
+    opened = []
+    meta, _ = run(crop_api(tmp_path / "on", opened=opened).show_match("Meds", 1, "anxious"))
+    assert [str(p) for p in opened] == meta["saved"]
+    assert V.truthy("1") and V.truthy(" On ") and V.truthy("true")
+    assert not V.truthy("0") and not V.truthy("") and not V.truthy(None) and not V.truthy("off")
+
+
+def test_show_match_says_what_is_missing_rather_than_guessing(tmp_path):
+    a = crop_api(tmp_path)
+    for args, message in [(("Meds", 2, "anxious"), "nothing written"), (("Meds", 9, "anxious"), "no page 9"),
+                          (("Meds", 1, "  "), "which words"), (("Meds", 1, "pizza"), "none of pizza"),
+                          (("Therapy notes", 1, "anxious"), "isn't in the handwriting index")]:
+        with pytest.raises(ValueError, match=message):
+            run(a.show_match(*args))
+    no_index = api(Policy(allow=["*"]), index=tmp_path / "missing.db", crop_dir=tmp_path / "c")
+    with pytest.raises(ValueError, match="index, which isn't there"):
+        run(no_index.show_match("Meds", 1, "anxious"))
+
+
+def test_show_match_cannot_reach_a_notebook_that_is_not_shared(tmp_path):
+    a = crop_api(tmp_path, policy=Policy(allow=["*"], deny=["Health"]))
+    with pytest.raises(NotShared, match="no shared notebook called"):
+        run(a.show_match("Meds", 1, "anxious"))
+    assert a.paper.read == [] and not (tmp_path / "crops").exists()                  # nothing fetched or saved
+
+
+def test_only_the_newest_crops_are_kept(tmp_path, monkeypatch):
+    monkeypatch.setattr(V, "MAX_SAVED", 3)
+    a = crop_api(tmp_path)
+    for _ in range(4):
+        run(a.show_match("Meds", 1, "anxi"))                      # two crops each
+    assert len(list((tmp_path / "crops").glob("*.png"))) == 3
+
+
+def test_the_show_match_tool_returns_a_caption_with_the_reference_and_the_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(V, "_API", crop_api(tmp_path))
+    blocks = run(V.build().call_tool("viwoods_show_match", {"notebook": "Meds", "page": 1, "words": "anxious"}))
+    blocks = blocks if isinstance(blocks, list) else blocks.content
+    assert [b.type for b in blocks] == ["text", "image"]
+    assert "Health › Meds · p. 1" in blocks[0].text and "outlined in red" in blocks[0].text and "Saved to" in blocks[0].text
