@@ -24,8 +24,8 @@ viwoods-mcp policy        # what that shares, folder by folder
 
 | Tool | What it does |
 |---|---|
-| `viwoods_list_folders` | The folders of shared notebooks with counts, and how many notebooks are *not* shared (a number only) |
-| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, and which pages have writing |
+| `viwoods_list_folders` | The folders of shared notebooks with counts (with and without their subfolders), and how many notebooks are *not* shared (a number only) |
+| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when it last changed |
 | `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
 | `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks (needs paperd's index, see below) |
 | `viwoods_add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
@@ -100,11 +100,12 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 
 **How a rule matches:**
 
-- A rule is a **folder path**, case-insensitive, and `*` matches within a name (`Ref*`).
+- A rule is a **folder path**, case-insensitive, ignoring spaces at the ends of a name. `*` is the only wildcard and matches within a name (`Ref*`); `[`, `]` and `?` are ordinary characters.
 - It covers that folder, every folder under it, and every notebook in them.
 - The last part can be a **notebook's title**, so `Health/Meds` shares just that one.
 - `"*"` allows everything. Pair it with `deny` rules for what you keep back.
-- A notebook that no rule allows is **not shared**, and with no file at all nothing is.
+- A notebook that no rule allows is **not shared**, and with no file at all nothing is. The same goes for a file that can't be read, or whose `deny` isn't a list.
+- `write` is on only for a literal `true`; `"true"`, `1` and the like leave it off.
 - Edits apply to the next call. There's nothing to restart.
 
 | Environment variable | |

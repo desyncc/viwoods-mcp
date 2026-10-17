@@ -1,14 +1,15 @@
 """What may be shared: a list of folder paths to allow and to deny.
 
-A rule is a folder path (case-insensitive, `*` matches within a name). It covers that folder,
-every folder under it and every notebook in them, and its last part may be a notebook's title.
-**Deny wins over allow**, and a notebook that no rule allows is not shared. `"*"` allows everything
-(then deny what you keep back). With no policy file nothing is shared.
+A rule is a folder path (case-insensitive, `*` is the only wildcard and matches within a name). It
+covers that folder, every folder under it and every notebook in them, and its last part may be a
+notebook's title. **Deny wins over allow**, and a notebook that no rule allows is not shared. `"*"`
+allows everything (then deny what you keep back). With no policy file, or one that can't be
+understood, nothing is shared.
 """
 
-import fnmatch
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,8 +19,15 @@ POLICY_FILE = Path(os.environ.get("VIWOODS_MCP_POLICY")
                    or Path.home() / ".config" / "viwoods-mcp" / "policy.json")
 
 
-def _parts(rule: str) -> list[str]:
-    return [p.strip().lower() for p in rule.replace("\\", "/").split("/") if p.strip()]
+def parts(path: str) -> list[str]:
+    """A folder path as its names: split on / (or \\), stripped, lower-cased, empty ones dropped."""
+    return [p.strip().lower() for p in path.replace("\\", "/").split("/") if p.strip()]
+
+
+def _name_matches(pattern: str, name: str) -> bool:
+    """`*` matches anything; every other character, `[`, `]` and `?` included, matches itself."""
+    return re.fullmatch(".*".join(re.escape(piece) for piece in pattern.split("*")), name,
+                        re.DOTALL) is not None
 
 
 @dataclass
@@ -29,16 +37,21 @@ class Policy:
     write: bool = False            # may viwoods_add_pdf_notebook put a PDF on the tablet (into an allowed folder)
 
     @staticmethod
-    def covers(rule: str, path: list[str]) -> bool:
+    def covers(rule: str, path: list[str], flat: bool = False) -> bool:
         """Does `rule` cover `path` (folder names, then the notebook's title)? A rule is a prefix
-        of the path, name by name, with `*` globs and no regard to case."""
-        want, have = _parts(rule), [p.lower() for p in path]
+        of the path, name by name, with `*` globs and no regard to case or edge whitespace.
+
+        A name that itself holds a "/" can't be told apart from two names, so `flat` reads the path
+        as one string split on every "/": that over-matches, which is what a deny rule wants. An
+        allow rule must line up with the names exactly."""
+        want = parts(rule)
+        have = parts("/".join(path)) if flat else [p.strip().lower() for p in path]
         if not want or len(want) > len(have):
             return False
-        return all(fnmatch.fnmatchcase(h, w) for w, h in zip(want, have))
+        return all(_name_matches(w, h) for w, h in zip(want, have))
 
     def allows(self, path: list[str]) -> bool:
-        if any(self.covers(r, path) for r in self.deny):
+        if any(self.covers(r, path, flat=True) for r in self.deny):
             return False
         return any(self.covers(r, path) for r in self.allow)
 
@@ -48,11 +61,13 @@ class Policy:
             raw = json.loads(Path(path).read_text())
         except (OSError, ValueError):
             return cls()                                    # no file: nothing is shared
+        if not isinstance(raw, dict) or not isinstance(raw.get("deny", []), list):
+            return cls()                    # a deny list that isn't read must not mean "no denials"
 
         def names(key):
             v = raw.get(key, [])
             return [str(x) for x in v] if isinstance(v, list) else []
-        return cls(names("allow"), names("deny"), bool(raw.get("write", False)))
+        return cls(names("allow"), names("deny"), raw.get("write") is True)
 
     def save(self, path: Path = POLICY_FILE) -> None:
         path = Path(path)

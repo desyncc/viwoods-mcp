@@ -18,11 +18,14 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from .adb import AdbError, Device
 from .paper import Notebook, PaperApp, PaperError
-from .policy import POLICY_FILE, Policy, apply_rule, notebook_path
+from .pdfnote import PdfNoteError
+from .policy import POLICY_FILE, Policy, apply_rule, notebook_path, parts
 
 # paperd's ink index (optional): viwoods_search_handwriting reads the text it recognised from your pages.
 INDEX = Path(os.environ.get("VIWOODS_MCP_INDEX")
@@ -31,13 +34,43 @@ MAX_PAGES = 8                      # pages per read_pages call
 MAX_RESULTS = 20
 
 
-def _parts(folder: str) -> list[str]:
-    return [p.strip().lower() for p in folder.replace("\\", "/").split("/") if p.strip()]
-
-
 class NotShared(Exception):
     """The notebook is missing or not shared: one message for both, so it can't be used to probe."""
 
+
+# What a tool may fail with and still have its message shown to the model.
+EXPECTED = (NotShared, ValueError, OSError, PaperError, AdbError, PdfNoteError)
+
+
+def ranges(nums) -> str:
+    """Page numbers as "1-3, 5"; "none" when there are none."""
+    nums = sorted(set(nums))
+    runs: list[list[int]] = []
+    for n in nums:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs) or "none"
+
+
+def when(ts: float) -> str:
+    """A timestamp as local time with its UTC offset, e.g. 2026-10-17T11:30+02:00."""
+    return datetime.fromtimestamp(ts).astimezone().isoformat(timespec="minutes")
+
+
+def describe(meta: dict) -> str:
+    """The one-line account of a read_pages call that goes above the images."""
+    total = meta["page_count"]
+    lines = [f"“{meta['notebook']}”, {total} page{'' if total == 1 else 's'}."]
+    for key, text in (("no_writing", "No writing on page{s} {r}."),
+                      ("not_in_notebook", f"Page{{s}} {{r}} {{is_}} past the end (it has {total})."),
+                      ("could_not_read", "Could not read page{s} {r}: the tablet did not give it up; try again.")):
+        nums = meta[key]
+        if nums:
+            lines.append(text.format(s="" if len(nums) == 1 else "s", r=ranges(nums),
+                                     is_="is" if len(nums) == 1 else "are"))
+    return " ".join(lines)
 
 class ViwoodsAPI:
     """The tools' body. `paper` is a paper.PaperApp (or a fake with notebooks() and png())."""
@@ -61,29 +94,34 @@ class ViwoodsAPI:
 
     async def folders(self) -> dict:
         shared, hidden = await self._split()
-        counts: dict[str, int] = {}
+        below: dict[str, int] = {}             # notebooks in the folder or any folder under it
+        inside: dict[str, int] = {}            # notebooks directly in it
+        top = 0
         for b in shared:
-            parts = [p for p in b.folder.split("/") if p]
-            if not parts:
-                counts["(top level)"] = counts.get("(top level)", 0) + 1
-            for i in range(1, len(parts) + 1):
-                key = "/".join(parts[:i])
-                counts[key] = counts.get(key, 0) + 1
-        return {"folders": [{"path": k, "notebooks": v} for k, v in sorted(counts.items())],
+            names = [p for p in b.folder.split("/") if p]
+            if not names:
+                top += 1
+                continue
+            for i in range(1, len(names) + 1):
+                key = "/".join(names[:i])
+                below[key] = below.get(key, 0) + 1
+            inside["/".join(names)] = inside.get("/".join(names), 0) + 1
+        return {"folders": [{"path": k, "notebooks": v, "directly_inside": inside.get(k, 0)}
+                            for k, v in sorted(below.items())],
+                "top_level_notebooks": top,
                 "notebooks_shared": len(shared), "notebooks_not_shared": hidden}
 
     async def notebooks(self, folder: str = "") -> list[dict]:
         shared, _ = await self._split()
-        want = _parts(folder)
+        want = parts(folder)
         out = []
-        for b in shared:
-            have = [p.lower() for p in b.folder.split("/") if p]
-            if want and have[:len(want)] != want:
+        for b in sorted(shared, key=lambda b: b.modified, reverse=True):
+            if want and parts(b.folder)[:len(want)] != want:
                 continue
             out.append({"id": b.id, "title": b.title, "folder": b.folder,
-                        "pages": len(b.pages), "written_pages": [p.n for p in b.written],
-                        "modified": b.modified})
-        return sorted(out, key=lambda n: n["modified"], reverse=True)
+                        "page_count": len(b.pages), "written_pages": ranges(p.n for p in b.written),
+                        "modified": when(b.modified)})
+        return out
 
     async def _find(self, ref: str) -> Notebook:
         shared, _ = await self._split()
@@ -107,18 +145,21 @@ class ViwoodsAPI:
         if len(wanted) > MAX_PAGES:
             raise ValueError(f"ask for at most {MAX_PAGES} pages at a time")
         by_n = {p.n: p for p in nb.pages}
-        out, blank = [], []
+        out, blank, past_end, failed = [], [], [], []
         for n in wanted:
             page = by_n.get(n)
-            if page is None or not page.written:
+            if page is None:
+                past_end.append(n)
+            elif not page.written:
                 blank.append(n)
-                continue
-            try:
-                out.append((n, await self.paper.png(page)))
-            except PaperError:
-                blank.append(n)
+            else:
+                try:
+                    out.append((n, await self.paper.png(page)))
+                except (PaperError, OSError):       # the tablet or the file, not a blank page
+                    failed.append(n)
         self.log(f"read_pages {nb.id} {wanted}")
-        return {"notebook": nb.title, "of": len(nb.pages), "nothing_on": blank}, out
+        return {"notebook": nb.title, "page_count": len(nb.pages), "no_writing": blank,
+                "not_in_notebook": past_end, "could_not_read": failed}, out
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         words = [w for w in query.lower().split() if w][:6]
@@ -128,28 +169,34 @@ class ViwoodsAPI:
         by_id = {b.id: b for b in shared}
         if not by_id:
             return []
+        limit = max(1, min(int(limit), MAX_RESULTS))
         con = sqlite3.connect(f"file:{self.index}?mode=ro", uri=True)
+        # SQLite's own lower() and LIKE fold only ASCII letters, so "Über" would never match "über"
+        con.create_function("plower", 1, lambda s: s.lower() if isinstance(s, str) else s,
+                            deterministic=True)
+        out = []
         try:
-            where = " and ".join("lower(text) like ? escape '\\'" for _ in words)
+            where = " and ".join("plower(text) like ? escape '\\'" for _ in words)
             args = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
                     for w in words]
-            rows = con.execute(f"select nb, page, text from ink_pages where src = 'stock' and "
-                               f"status = 'done' and {where} order by ts desc limit 400", args).fetchall()
+            # Newest first, read lazily: rows of notebooks that are not shared are skipped here
+            # (dropped, not counted) so they can't crowd the shared ones out of the limit.
+            for nb_id, page_id, text in con.execute(
+                    f"select nb, page, text from ink_pages where src = 'stock' and "
+                    f"status = 'done' and {where} order by ts desc", args):
+                nb = by_id.get(nb_id)
+                if nb is None:
+                    continue
+                page = next((p for p in nb.pages if p.id == page_id), None)
+                at = max(0, text.lower().find(words[0]) - 60)
+                snippet = " ".join(text[at:at + 220].split())
+                out.append({"notebook": nb.title, "notebook_id": nb.id, "folder": nb.folder,
+                            "page": page.n if page else None,
+                            "text": ("…" if at else "") + snippet + ("…" if at + 220 < len(text) else "")})
+                if len(out) >= limit:
+                    break
         finally:
             con.close()
-        out = []
-        for nb_id, page_id, text in rows:
-            nb = by_id.get(nb_id)
-            if nb is None:
-                continue                                    # not shared: dropped, not counted
-            page = next((p for p in nb.pages if p.id == page_id), None)
-            low = text.lower()
-            at = max(0, low.find(words[0]) - 60)
-            out.append({"notebook": nb.title, "notebook_id": nb.id, "folder": nb.folder,
-                        "page": page.n if page else None,
-                        "text": " ".join(text[at:at + 220].split())})
-            if len(out) >= min(limit, MAX_RESULTS):
-                break
         return out
 
     async def add_pdf(self, pdf_path: str, title: str, folder: str = "") -> dict:
@@ -186,54 +233,74 @@ def _api() -> ViwoodsAPI:
     return _API
 
 
+@contextmanager
+def _expected():
+    """Failures we saw coming reach the model as an error with their own message."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    try:
+        yield
+    except EXPECTED as e:
+        raise ToolError(str(e) or type(e).__name__) from e
+
+
 def build():
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ImageContent, TextContent
 
     srv = MCPServer("viwoods", instructions=INSTRUCTIONS)
 
     @srv.tool()
     async def viwoods_list_folders() -> str:
-        """The Viwoods tablet's Paper app: its folders of shared notebooks, with how many notebooks
-        each holds, and how many notebooks are not shared (a count only). Not Nextcloud folders."""
-        return json.dumps(await _api().folders(), ensure_ascii=False)
+        """The folders of shared notebooks in the Viwoods tablet's Paper app (not Nextcloud folders).
+        `notebooks` counts a folder and everything under it, `directly_inside` only its own; also
+        the shared notebooks at the top level, and how many notebooks are not shared (a count only)."""
+        with _expected():
+            return json.dumps(await _api().folders(), ensure_ascii=False)
 
     @srv.tool()
     async def viwoods_list_notebooks(folder: str = "") -> str:
-        """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page count and which pages have
-        writing. `folder` limits it to a folder (and the folders under it)."""
-        return json.dumps(await _api().notebooks(folder), ensure_ascii=False)
+        """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page
+        count, which pages have writing (e.g. "1-3, 5") and when it was last changed. `folder` limits
+        it to a folder and the folders under it."""
+        with _expected():
+            return json.dumps(await _api().notebooks(folder), ensure_ascii=False)
 
     @srv.tool()
     async def viwoods_read_pages(notebook: str, pages: list[int]) -> list:
-        """Pages of a shared Viwoods Paper notebook as images, to read the handwriting. `notebook` is its title or
-        id; `pages` are positions (1 = first), at most 8 per call."""
-        try:
+        """Pages of a shared Viwoods Paper notebook as images, to read the handwriting. `notebook` is
+        its title or id; `pages` are positions (1 = first), at most 8 per call. Pages with nothing
+        written are not sent; the first line says which."""
+        with _expected():
             meta, images = await _api().read_pages(notebook, pages)
-        except (NotShared, ValueError) as e:
-            return [TextContent(type="text", text=str(e))]
-        blocks: list = [TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        blocks: list = [TextContent(type="text", text=describe(meta))]
         for n, png in images:
-            blocks.append(TextContent(type="text", text=f"page {n} of {meta['of']}:"))
+            blocks.append(TextContent(type="text", text=f"page {n} of {meta['page_count']}:"))
             blocks.append(ImageContent(type="image", data=base64.b64encode(png).decode(),
                                        mimeType="image/png"))
         return blocks
 
     @srv.tool()
     async def viwoods_search_handwriting(query: str, limit: int = 10) -> str:
-        """Find words in the handwriting of shared Viwoods Paper notebooks (the text paperd's index read from the
-        pages; it needs paperd's index file (VIWOODS_MCP_INDEX) and covers pages it has read). Returns the notebook,
-        page and a snippet."""
-        return json.dumps(await _api().search(query, limit), ensure_ascii=False)
+        """Find words in the handwriting of shared Viwoods Paper notebooks: the text paperd's index read
+        from the pages (it needs paperd's index file, VIWOODS_MCP_INDEX, and only covers pages it has
+        read). Returns the notebook, page and a snippet, newest first."""
+        api = _api()
+        if not api.index.exists():
+            raise ToolError(f"The handwriting index isn't there ({api.index}); it comes from paperd. "
+                            "Set VIWOODS_MCP_INDEX if it lives somewhere else.")
+        with _expected():
+            hits = await api.search(query, limit)
+        if not hits:
+            return f"No matches for “{query}” in the shared notebooks' indexed handwriting."
+        return json.dumps(hits, ensure_ascii=False)
 
     @srv.tool()
     async def viwoods_add_pdf_notebook(pdf_path: str, title: str, folder: str = "") -> str:
         """Put a PDF from this PC on the Viwoods tablet as a new Paper notebook to write on, into a shared top
         level `folder` (or the top level). Only when the user has switched writing on."""
-        try:
+        with _expected():
             return json.dumps(await _api().add_pdf(pdf_path, title, folder), ensure_ascii=False)
-        except Exception as e:                                     # tell the model, don't crash
-            return f"Not added: {e}"
 
     return srv
 

@@ -27,6 +27,7 @@ class Device:
             out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()
             raise AdbError(f"adb {' '.join(args[:3])} timed out") from None
         if proc.returncode:
             raise AdbError(err.decode(errors="replace").strip() or f"adb exited {proc.returncode}")
@@ -36,10 +37,12 @@ class Device:
         """`adb [-s serial] <args>`; stdout bytes, or AdbError."""
         if self.serial and ":" in self.serial and not self._connected:
             try:
-                await self._exec("connect", self.serial, timeout=10)
+                out = await self._exec("connect", self.serial, timeout=10)
             except AdbError:
-                pass                                   # the next call says what is wrong
-            self._connected = True
+                out = b""                              # the next call says what is wrong
+            # `adb connect` exits 0 even when it fails ("failed to connect to ..."), so read what
+            # it said; until it says "connected" the next call tries again.
+            self._connected = b"connected to" in out
         target = ["-s", self.serial] if self.serial else []
         return await self._exec(*target, *args, timeout=timeout)
 

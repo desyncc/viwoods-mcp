@@ -9,6 +9,7 @@ snapshotted instead, which does need `adb root`.
 import asyncio
 import io
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -22,7 +23,7 @@ PROVIDER = "content://com.wisky.libnotewriter.contentprovider.FileInfoProvider"
 SNAPSHOT = "/data/local/tmp/viwoods-mcp-notes.db"
 
 FOLDER, NOTEBOOK, PAGE = 10, 20, 30                  # tb_file_info.fileType
-INK, SHOT, PATH, THUMB = 1, 2, 7, 9                  # tb_page_resource.resourceType
+INK, SHOT = 1, 2                                     # tb_page_resource.resourceType
 # fileState bits (the app's own): 2 encrypted, 4 recycle bin, 16 deleted forever, 64 a PDF template.
 # A locked notebook is never listed here; none of the others is a notebook to read.
 HIDDEN_STATES = 2 | 4 | 16 | 64
@@ -39,11 +40,8 @@ class Page:
     n: int                     # 1-based position in the notebook
     id: str
     user: str                  # the app's user folder holding the files
-    modified: float = 0.0
     shot: str | None = None
     ink: str | None = None
-    thumb: str | None = None
-    path: str | None = None
 
     @property
     def written(self) -> bool:
@@ -114,7 +112,7 @@ class PaperApp:
                 if _int(r.get("fileType")) in (FOLDER, NOTEBOOK, PAGE)]
         res = [(r.get("r_pid", ""), _int(r.get("resourceType")), r.get("r_fileName", ""))
                for r in await table("page_resource")
-               if _int(r.get("resourceType")) in (INK, PATH, SHOT, THUMB)]
+               if _int(r.get("resourceType")) in (INK, SHOT)]
         return rows, res
 
     async def _read_db(self):
@@ -135,7 +133,7 @@ class PaperApp:
                 "select id, pid, userId, fileName, fileType, fileState, lastModifiedTime, `order` "
                 "from tb_file_info where fileType in (?, ?, ?)", (FOLDER, NOTEBOOK, PAGE)).fetchall()
             res = con.execute("select r_pid, resourceType, r_fileName from tb_page_resource "
-                              "where resourceType in (?, ?, ?, ?)", (INK, PATH, SHOT, THUMB)).fetchall()
+                              "where resourceType in (?, ?)", (INK, SHOT)).fetchall()
         finally:
             con.close()
         return rows, res
@@ -143,8 +141,11 @@ class PaperApp:
     async def _load(self) -> dict[str, Notebook]:
         try:
             rows, res = await self._read_provider()
-        except Exception:
-            rows, res = await self._read_db()
+        except Exception as provider_error:
+            try:
+                rows, res = await self._read_db()
+            except PaperError as e:
+                raise PaperError(f"{e} (the provider said: {provider_error})") from e
 
         parent = {r[0]: (r[1], r[3]) for r in rows if r[4] == FOLDER}
 
@@ -159,7 +160,7 @@ class PaperApp:
                  for r in rows if r[4] == NOTEBOOK and not r[5] & HIDDEN_STATES}
         have: dict[str, set[str]] = {}
         for user in {r[2] for r in rows if r[4] == NOTEBOOK and r[0] in books}:
-            listing = await self._run("shell", f"ls {FILES}/{user}")
+            listing = await self._run("shell", f"ls {shlex.quote(f'{FILES}/{user}')}")
             have[user] = set(listing.decode(errors="replace").split())
 
         by_page: dict[str, dict[int, str]] = {}
@@ -170,8 +171,7 @@ class PaperApp:
             nb = books[r[1]]
             user, got = r[2], by_page.get(r[0], {})
             there = lambda kind: got.get(kind) if got.get(kind) in have.get(user, ()) else None
-            nb.pages.append(Page(len(nb.pages) + 1, r[0], user, r[6] / 1000,
-                                 shot=there(SHOT), ink=there(INK), thumb=there(THUMB), path=there(PATH)))
+            nb.pages.append(Page(len(nb.pages) + 1, r[0], user, shot=there(SHOT), ink=there(INK)))
         return books
 
     # -- pictures
@@ -180,7 +180,7 @@ class PaperApp:
         name = page.shot or page.ink
         if not name:
             raise PaperError(f"page {page.n} has nothing written on it")
-        raw = await self._run("exec-out", f"cat '{FILES}/{page.user}/{name}'")
+        raw = await self._run("exec-out", f"cat {shlex.quote(f'{FILES}/{page.user}/{name}')}")
         return await asyncio.to_thread(_flatten, raw)
 
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import shlex
 import sqlite3
 
 import pytest
@@ -50,7 +51,7 @@ class Adb:
             if self.db is None:
                 return b""
             return self.db
-        if cmd.startswith("cat '"):
+        if cmd.startswith("cat "):
             return png()
         raise AssertionError(cmd)
 
@@ -71,7 +72,7 @@ def test_the_provider_builds_the_tree_and_hides_locked_bin_and_template_notebook
     meds = books[0]
     assert meds.folder == "Health, Care"
     assert [p.n for p in meds.pages] == [1, 2] and [p.written for p in meds.pages] == [True, False]
-    assert meds.pages[0].shot == "screenshotBmp_a.png" and meds.pages[0].thumb == "Thumbnail_a.png"
+    assert meds.pages[0].shot == "screenshotBmp_a.png"
     assert not any(c.startswith("sqlite3") for c in adb.cmds)           # no root needed
 
 
@@ -106,3 +107,18 @@ def test_a_page_comes_back_as_an_rgb_png_flattened_on_white_and_capped():
     assert max(Image.open(io.BytesIO(big)).size) == paper.MAX_EDGE
     faint = Image.open(io.BytesIO(paper._flatten(png(rgba=(0, 0, 0, 0))))).getpixel((0, 0))
     assert faint == (255, 255, 255)
+
+
+def test_names_from_the_app_are_quoted_in_the_shell_commands_sent_to_the_tablet():
+    adb = Adb()
+    app = PaperApp(adb)
+    meds = run(app.notebooks())[0]
+    meds.pages[0].shot = "a'b; rm -rf x.png"
+    run(app.png(meds.pages[0]))
+    assert shlex.split(adb.cmds[-1]) == ["cat", f"{paper.FILES}/u1/a'b; rm -rf x.png"]
+
+
+def test_when_both_ways_fail_the_error_says_what_the_provider_said_too():
+    with pytest.raises(PaperError) as e:
+        run(PaperApp(Adb(provider=False, db=None)).notebooks())
+    assert "adb root" in str(e.value) and "provider said" in str(e.value)
