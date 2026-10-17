@@ -19,6 +19,7 @@ viwoods-mcp policy        # what that shares, folder by folder
 - **🔒 A folder allow/deny list.** One small file decides what Claude can see. Nothing is shared until you add a rule, deny always beats allow, and a notebook you haven't shared doesn't exist as far as Claude can tell.
 - **🪶 No root.** It reads the tablet with plain `adb`, through the Paper app's own content provider and its page files. If the provider says nothing it falls back to a database snapshot, and that part needs `adb root`.
 - **👀 Claude can read your handwriting.** Pages come back as images, so it reads the ink itself rather than a lossy OCR pass.
+- **📜 An audit log.** A private record of every notebook and page Claude was shown, what it searched for, and what it asked for that wasn't shared. `viwoods-mcp audit` shows the end of it. It never holds page images or text.
 - **🔎 Optional handwriting search**, if you also run [paperd](https://github.com/desyncc/paper-console)'s ink index. Every hit comes with a precise reference (`Journals › 2026-04-07 · p. 3 · changed 2026-04-07`) and a count of how many matches there were in all.
 - **🖼️ Show me where I wrote it.** `viwoods_show_match` crops the page to the words you asked about, outlined and enlarged, using the word boxes in paperd's index. The crop is also saved on your PC and can be opened in your image viewer.
 - **✍️ Optional PDF import**, off by default: put a PDF on the tablet as a notebook to write on, into a folder you've shared.
@@ -26,7 +27,7 @@ viwoods-mcp policy        # what that shares, folder by folder
 | Tool | What it does |
 |---|---|
 | `viwoods_list_folders` | The folders of shared notebooks with counts (with and without their subfolders), and how many notebooks are *not* shared (a number only) |
-| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when it last changed. `since` / `until` keep to notebooks with pages changed in that time and say which |
+| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when anything in it last changed. `query` finds notebooks by words in the title or folder (no index needed); `since` / `until` keep to notebooks with pages changed in that time and say which |
 | `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
 | `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks, newest page first, optionally limited by `since` / `until` (needs paperd's index, see below) |
 | `viwoods_show_match` | A page zoomed in on where some words are written (up to 3 spots, outlined in red), saved to your PC. Needs paperd's index |
@@ -115,6 +116,7 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 | `VIWOODS_MCP_POLICY` | Path to the policy file |
 | `VIWOODS_MCP_SERIAL` | adb serial, or `host:port` for Wi-Fi |
 | `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` and `viwoods_show_match` |
+| `VIWOODS_MCP_AUDIT_LOG` | Where the audit log goes (default `~/.local/state/viwoods-mcp/audit.log`, mode 600, about 1 MB kept plus the previous one). `off` turns it off |
 | `VIWOODS_MCP_OPEN_IMAGES` | `1` opens each crop from `viwoods_show_match` in your default image viewer. Off by default, so no window appears unasked |
 | `VIWOODS_MCP_CROP_WIDTH` | How wide a `viwoods_show_match` crop may be, in page pixels (600–1800, default 1500). Lines on the tablet run about 1500–1700 px, so wider shows more of the line and narrower zooms in tighter |
 | `VIWOODS_MCP_CROP_DIR` | Where those crops are saved (default `~/.cache/viwoods-mcp/crops`; private to you, the newest 50 are kept) |
@@ -142,6 +144,7 @@ viwoods-mcp allow Health         # add an allow rule
 viwoods-mcp deny Journals        # add a deny rule
 viwoods-mcp remove Journals      # drop a rule from either list
 viwoods-mcp policy               # show the policy and what it shares
+viwoods-mcp audit -n 30          # the last 30 things Claude was shown
 viwoods-mcp write on             # let viwoods_add_pdf_notebook put PDFs on the tablet
 viwoods-mcp write off
 ```
@@ -161,6 +164,10 @@ Rules can be edited by hand in the policy file too.
 - **`viwoods_search_handwriting`** reads the text paperd's ink index recognised from your pages (the `ink_pages` table in its `index.db`). Without that file it simply returns nothing.
 
 Checked on an AiPaper (SE03) with firmware 3.15.x and Paper app 1.8.9. A different firmware may move things around; the provider authority and the page-file layout are the two places to look.
+
+### Read-only hints
+
+The read tools are marked read-only to clients, so an app can run them without asking each time and still stop to ask before `viwoods_add_pdf_notebook`. `viwoods_show_match` is marked as not read-only, because it saves a crop file on your PC.
 
 ### What it won't do
 

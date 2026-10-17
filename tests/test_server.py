@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from viwoods_mcp import audit as audit_mod
 from viwoods_mcp import crop as crop_mod
 from viwoods_mcp import paper as paper_mod
 from viwoods_mcp import server as V
@@ -540,3 +541,91 @@ def test_a_reference_dates_the_page_it_names_and_a_bare_notebook_by_its_newest_p
     assert V.cite(book, 1).endswith(f"p. 1 · changed {stamp(day(1))}")
     assert V.cite(book, 2).endswith(f"p. 2 · changed {stamp(day(12))}")
     assert V.cite(book).endswith(f"changed {stamp(day(12))}") and "p." not in V.cite(book)
+
+
+# ---------------------------------------------------------------- annotations, title search, audit
+
+def test_the_tools_say_which_of_them_only_read_and_which_write_something(monkeypatch):
+    tools = {t.name: t.annotations for t in run(V.build().list_tools())}
+    assert set(tools) == {"viwoods_list_folders", "viwoods_list_notebooks", "viwoods_read_pages",
+                          "viwoods_search_handwriting", "viwoods_show_match", "viwoods_add_pdf_notebook"}
+    for name in ("viwoods_list_folders", "viwoods_list_notebooks", "viwoods_read_pages", "viwoods_search_handwriting"):
+        assert tools[name].read_only_hint is True and tools[name].destructive_hint is False, name
+    for name in ("viwoods_show_match", "viwoods_add_pdf_notebook"):             # a crop file / a new notebook
+        assert tools[name].read_only_hint is False and tools[name].destructive_hint is False, name
+    assert all(a.open_world_hint is False for a in tools.values())
+
+
+def test_list_notebooks_can_be_searched_by_words_in_the_title_or_folder():
+    books = [nb("1", "Pasta recipes", "Reference/Cooking"), nb("2", "Dinner Ideas", "Reference/Cooking"),
+             nb("3", "Meds", "Health"), nb("4", "RECIPES to try", "Journals")]
+    a = api(Policy(allow=["*"], deny=["Journals"]), books)
+    titles = lambda **kw: sorted(n["title"] for n in run(a.notebooks(**kw)))
+    assert titles(query="recipes") == ["Pasta recipes"]                          # case-insensitive; Journals is denied
+    assert titles(query="cooking") == ["Dinner Ideas", "Pasta recipes"]          # the folder counts
+    assert titles(query="cooking pasta") == ["Pasta recipes"]                    # every word must be there
+    assert titles(query="  ") == titles() and len(titles()) == 3
+    assert titles(query="pizza") == []
+    assert titles(query="cooking", folder="Health") == []                        # together with the other filters
+
+
+def audited(tmp_path, **kw):
+    log = tmp_path / "audit.log"
+    return api(Policy(allow=["Health"]), audit=audit_mod.AuditLog(log), **kw), lambda: audit_mod.tail(log, 50)
+
+
+def test_what_claude_is_shown_is_recorded_and_what_it_is_refused_too(tmp_path):
+    a, entries = audited(tmp_path)
+    run(a.folders())
+    run(a.notebooks("Health", query="med"))
+    run(a.read_pages("Meds", [1, 2]))
+    with pytest.raises(NotShared):
+        run(a.read_pages("Journals secret", [1]))
+    tools = [e["tool"] for e in entries()]
+    assert tools == ["list_folders", "list_notebooks", "read_pages", "refused"]
+    shown = entries()[2]
+    assert shown["notebook_id"] == "h1" and shown["title"] == "Meds" and shown["pages"] == "1"
+    assert entries()[1]["query"] == "med" and entries()[1]["returned"] == 1
+    assert entries()[3]["notebook"] == "Journals secret"
+    assert "PNG" not in json.dumps(entries())                                    # never the images themselves
+
+
+def test_a_search_is_recorded_with_what_it_returned_but_not_the_text(tmp_path):
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "my private blue thought")])
+    a, entries = audited(tmp_path, index=tmp_path / "i.db")
+    run(a.search("blue", until="2020-01-01"))                    # the fake notebooks date from 1970
+    (entry,) = entries()
+    assert entry["tool"] == "search" and entry["query"] == "blue" and entry["until"] == "2020-01-01"
+    assert entry["total"] == 1 and entry["shown"] == 1 and entry["hits"][0].startswith("Health › Meds · p. 1")
+    assert "private" not in json.dumps(entry)
+
+
+def test_a_crop_shown_is_recorded_and_so_is_a_pdf_added(tmp_path, monkeypatch):
+    a = crop_api(tmp_path, policy=Policy(allow=["*"], write=True), audit=audit_mod.AuditLog(tmp_path / "a.log"))
+    run(a.show_match("Meds", 1, "anxious"))
+    (entry,) = audit_mod.tail(tmp_path / "a.log")
+    assert entry["tool"] == "show_match" and entry["notebook_id"] == "h1" and entry["page"] == 1
+    assert entry["words"] == "anxious" and entry["crops"] == 1
+    pdf = tmp_path / "plan.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+
+    class FakeNotes:
+        def __init__(self, tablet):
+            pass
+
+        async def add(self, data, title, folder):
+            return title + ".pdf"
+    monkeypatch.setattr("viwoods_mcp.pdfnote.PdfNotes", FakeNotes)
+    run(a.add_pdf(str(pdf), "Plan", "Health"))
+    assert audit_mod.tail(tmp_path / "a.log")[-1]["added"] == "Plan.pdf"
+
+
+def test_the_audit_command_shows_the_end_of_the_log_or_says_why_not(tmp_path):
+    path = tmp_path / "audit.log"
+    assert "Nothing recorded yet" in V._audit_text(path)
+    assert "switched off" in V._audit_text(None)
+    log = audit_mod.AuditLog(path)
+    for i in range(5):
+        log.record("search", query=f"q{i}", total=1, shown=1)
+    text = V._audit_text(path, 2)
+    assert text.splitlines()[0] == f"audit log: {path}" and "q4" in text and "q3" in text and "q2" not in text

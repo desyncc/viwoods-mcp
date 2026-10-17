@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import crop
 from .adb import AdbError, Device
+from .audit import AuditLog, audit_path, describe as describe_entry, tail
 from .paper import Notebook, PaperApp, PaperError
 from .pdfnote import PdfNoteError
 from .policy import POLICY_FILE, Policy, apply_rule, notebook_path, parts
@@ -119,10 +120,12 @@ class ViwoodsAPI:
     """The tools' body. `paper` is a paper.PaperApp (or a fake with notebooks() and png())."""
 
     def __init__(self, paper, policy: Policy, index: Path = INDEX, device=None, log=None,
-                 policy_file: Path | None = None, crop_dir: Path = CROP_DIR, open_image=None):
+                 policy_file: Path | None = None, crop_dir: Path = CROP_DIR, open_image=None,
+                 audit: AuditLog | None = None):
         self.paper, self.policy, self.index, self.device = paper, policy, Path(index), device
         self.crop_dir = Path(crop_dir)
         self.open_image = open_image            # async (path) -> None, or None: don't open anything
+        self.audit = audit or AuditLog(None)    # what was shown to Claude; None: no record
         self.policy_file = policy_file          # re-read on each call, so an edit applies at once
         self.log = log or (lambda msg: print(f"viwoods-mcp: {msg}", file=sys.stderr))
 
@@ -151,20 +154,27 @@ class ViwoodsAPI:
                 key = "/".join(names[:i])
                 below[key] = below.get(key, 0) + 1
             inside["/".join(names)] = inside.get("/".join(names), 0) + 1
+        self.audit.record("list_folders", shared=len(shared))
         return {"folders": [{"path": k, "notebooks": v, "directly_inside": inside.get(k, 0)}
                             for k, v in sorted(below.items())],
                 "top_level_notebooks": top,
                 "notebooks_shared": len(shared), "notebooks_not_shared": hidden}
 
-    async def notebooks(self, folder: str = "", since: str = "", until: str = "") -> list[dict]:
+    async def notebooks(self, folder: str = "", since: str = "", until: str = "",
+                        query: str = "") -> list[dict]:
         """Shared notebooks, newest first. With `since` / `until`, only those with a written page that
-        changed in that time, each saying which (`pages_changed`)."""
+        changed in that time, each saying which (`pages_changed`). With `query`, only those whose
+        title or folder holds every word of it."""
         shared, _ = await self._split()
         rng = TimeRange.of(since, until)
         want = parts(folder)
+        words = query.lower().split()
         out = []
         for b in sorted(shared, key=lambda b: b.last_changed, reverse=True):
             if want and parts(b.folder)[:len(want)] != want:
+                continue
+            label = f"{b.folder} {b.title}".lower()
+            if not all(w in label for w in words):
                 continue
             entry = {"id": b.id, "title": b.title, "folder": b.folder,
                      "page_count": len(b.pages), "written_pages": ranges(p.n for p in b.written),
@@ -175,6 +185,8 @@ class ViwoodsAPI:
                     continue
                 entry["pages_changed"] = ranges(recent)
             out.append(entry)
+        self.audit.record("list_notebooks", folder=folder, query=query, since=since, until=until,
+                          returned=len(out))
         return out
 
     async def _find(self, ref: str) -> Notebook:
@@ -189,6 +201,7 @@ class ViwoodsAPI:
             if len(hits) > 1:
                 raise NotShared(f"more than one shared notebook matches “{ref}”: "
                                 + ", ".join(f"{b.title} ({b.id})" for b in hits[:6]))
+        self.audit.record("refused", notebook=ref)
         raise NotShared(f"no shared notebook called “{ref}”")
 
     async def read_pages(self, notebook: str, pages: list[int]) -> tuple[dict, list[tuple[int, bytes]]]:
@@ -212,6 +225,8 @@ class ViwoodsAPI:
                 except (PaperError, OSError):       # the tablet or the file, not a blank page
                     failed.append(n)
         self.log(f"read_pages {nb.id} {wanted}")
+        self.audit.record("read_pages", notebook_id=nb.id, title=nb.title, pages=ranges(n for n, _ in out),
+                          could_not_read=ranges(failed) if failed else "")
         return {"notebook": nb.title, "page_count": len(nb.pages), "no_writing": blank,
                 "not_in_notebook": past_end, "could_not_read": failed,
                 "references": {n: cite(nb, n) for n, _ in out}}, out
@@ -262,6 +277,8 @@ class ViwoodsAPI:
                         "notebook": nb.title, "notebook_id": nb.id, "folder": nb.folder,
                         "page": page.n if page else None, "changed": when(changed),
                         "text": ("…" if at else "") + snippet + ("…" if at + 220 < len(text) else "")})
+        self.audit.record("search", query=query, since=since, until=until, total=total, shown=len(out),
+                          hits=[h["reference"] for h in out])
         result = {"total_matches": total, "shown": len(out), "results": out}
         if total > len(out):
             result["note"] = (f"Showing {len(out)} of {total} matches. Give the user the references "
@@ -311,6 +328,8 @@ class ViwoodsAPI:
             for path in saved:
                 await self.open_image(path)
         self.log(f"show_match {nb.id} p{n} {wanted} -> {len(shots)} crop(s)")
+        self.audit.record("show_match", notebook_id=nb.id, title=nb.title, page=n, words=" ".join(wanted),
+                          crops=len(shots), opened=self.open_image is not None)
         return {"reference": cite(nb, n), "words": wanted, "matched_words": len(boxes),
                 "spots_on_page": spots, "shown": len(shots), "saved": [str(p) for p in saved]}, shots
 
@@ -341,6 +360,7 @@ class ViwoodsAPI:
         from .pdfnote import PdfNotes
         name = await PdfNotes(self.device).add(path.read_bytes(), title, folder)
         self.log(f"add_pdf {name!r} -> {folder or '(top level)'}")
+        self.audit.record("add_pdf", added=name, folder=folder or "(top level)")
         return {"added": name, "folder": folder or "(top level)"}
 
 
@@ -380,11 +400,19 @@ def _expected():
 def build():
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
-    from mcp.types import ImageContent, TextContent
+    from mcp.types import ImageContent, TextContent, ToolAnnotations
+
+    # Clients use these to decide what to run without asking. Reading the tablet changes nothing
+    # anywhere; show_match writes a crop file on this PC; adding a PDF adds a notebook (never
+    # overwrites or deletes one).
+    reads = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True,
+                            open_world_hint=False)
+    writes_a_file = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False,
+                                    open_world_hint=False)
 
     srv = MCPServer("viwoods", instructions=INSTRUCTIONS)
 
-    @srv.tool()
+    @srv.tool(annotations=reads)
     async def viwoods_list_folders() -> str:
         """The folders of shared notebooks in the Viwoods tablet's Paper app (not Nextcloud folders).
         `notebooks` counts a folder and everything under it, `directly_inside` only its own; also
@@ -392,17 +420,18 @@ def build():
         with _expected():
             return json.dumps(await _api().folders(), ensure_ascii=False)
 
-    @srv.tool()
-    async def viwoods_list_notebooks(folder: str = "", since: str = "", until: str = "") -> str:
+    @srv.tool(annotations=reads)
+    async def viwoods_list_notebooks(folder: str = "", query: str = "", since: str = "", until: str = "") -> str:
         """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page
         count, which pages have writing (e.g. "1-3, 5") and when anything in it last changed. `folder` limits
-        it to a folder and the folders under it. `since` / `until` keep to notebooks with writing
+        it to a folder and the folders under it. `query` keeps to notebooks whose title or folder holds
+        every word of it (e.g. "recipes"), with no need for the handwriting index. `since` / `until` keep to notebooks with writing
         that changed in that time, and add `pages_changed` (which pages) to each; they take a date
         (2026-10-01, whole day), a date and time, today, yesterday, or how long ago (7d, 2w, 12h, 3m)."""
         with _expected():
-            return json.dumps(await _api().notebooks(folder, since, until), ensure_ascii=False)
+            return json.dumps(await _api().notebooks(folder, since, until, query), ensure_ascii=False)
 
-    @srv.tool()
+    @srv.tool(annotations=reads)
     async def viwoods_read_pages(notebook: str, pages: list[int]) -> list:
         """Pages of a shared Viwoods Paper notebook as images, to read the handwriting. `notebook` is
         its title or id; `pages` are positions (1 = first), at most 8 per call. Pages with nothing
@@ -417,7 +446,7 @@ def build():
                                        mimeType="image/png"))
         return blocks
 
-    @srv.tool()
+    @srv.tool(annotations=reads)
     async def viwoods_search_handwriting(query: str, limit: int = 10, since: str = "", until: str = "") -> str:
         """Find words in the handwriting of shared Viwoods Paper notebooks: the text paperd's index read
         from the pages (it needs paperd's index file, VIWOODS_MCP_INDEX, and only covers pages it has
@@ -437,7 +466,7 @@ def build():
                 " in that time." if since or until else ".")
         return json.dumps(found, ensure_ascii=False)
 
-    @srv.tool()
+    @srv.tool(annotations=writes_a_file)
     async def viwoods_show_match(notebook: str, page: int, words: str) -> list:
         """Show the user where something is written: the page of a shared notebook zoomed in on `words`
         (outlined in red, up to 3 spots), also saved to a folder on their PC and, if they've turned it
@@ -455,7 +484,7 @@ def build():
                                        mimeType="image/png"))
         return blocks
 
-    @srv.tool()
+    @srv.tool(annotations=writes_a_file)
     async def viwoods_add_pdf_notebook(pdf_path: str, title: str, folder: str = "") -> str:
         """Put a PDF from this PC on the Viwoods tablet as a new Paper notebook to write on, into a shared top
         level `folder` (or the top level). Only when the user has switched writing on."""
@@ -486,6 +515,15 @@ def _show(policy: Policy, books: list[Notebook] | None = None, file: Path = POLI
     return "\n".join(lines)
 
 
+def _audit_text(path: Path | None, n: int = 20) -> str:
+    if path is None:
+        return "The audit log is switched off (VIWOODS_MCP_AUDIT_LOG=off)."
+    entries = tail(path, max(1, n))
+    if not entries:
+        return f"Nothing recorded yet ({path})."
+    return "\n".join([f"audit log: {path}", *(describe_entry(e) for e in entries)])
+
+
 def main(argv: list[str] | None = None) -> None:
     global server, _API
     ap = argparse.ArgumentParser(prog="viwoods-mcp",
@@ -500,6 +538,8 @@ def main(argv: list[str] | None = None) -> None:
     w = sub.add_parser("write", help="switch writing (viwoods_add_pdf_notebook) on or off")
     w.add_argument("state", choices=["on", "off"])
     sub.add_parser("policy", help="show the policy and what it shares (reads the tablet)")
+    a = sub.add_parser("audit", help="show the end of the record of what Claude was shown")
+    a.add_argument("-n", type=int, default=20, metavar="LINES", help="how many entries (default 20)")
     args = ap.parse_args(argv)
 
     file = Path(args.policy)
@@ -516,7 +556,11 @@ def main(argv: list[str] | None = None) -> None:
         print(_show(policy, file=file))
         return
 
-    import asyncio
+    log_path = audit_path(os.environ.get("VIWOODS_MCP_AUDIT_LOG"))
+    if args.cmd == "audit":
+        print(_audit_text(log_path, args.n))
+        return
+
     device = Device(args.serial)
 
     async def run(*a: str) -> bytes:
@@ -534,7 +578,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"(the tablet could not be read: {e})")
         print(_show(policy, books, file))
         return
-    _API = ViwoodsAPI(paper, policy, device=device, policy_file=file,
+    _API = ViwoodsAPI(paper, policy, device=device, policy_file=file, audit=AuditLog(log_path),
                       open_image=open_in_viewer if truthy(os.environ.get("VIWOODS_MCP_OPEN_IMAGES")) else None)
     server = build()
     server.run()
