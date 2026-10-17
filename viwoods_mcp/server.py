@@ -36,6 +36,16 @@ INDEX = Path(os.environ.get("VIWOODS_MCP_INDEX")
 # Where viwoods_show_match saves the crops it makes (pieces of your pages, so the folder is private).
 CROP_DIR = Path(os.environ.get("VIWOODS_MCP_CROP_DIR") or Path.home() / ".cache/viwoods-mcp/crops")
 MAX_SAVED = 50                     # crops kept; the oldest go first
+
+
+def crop_width(value: str | None = None) -> int:
+    """VIWOODS_MCP_CROP_WIDTH: how wide a zoomed crop may be, in page pixels (600-1800). Narrower
+    means a bigger zoom on the words; wider shows more of the line. Anything else: the default."""
+    try:
+        return min(1800, max(600, int(value if value is not None else os.environ.get("VIWOODS_MCP_CROP_WIDTH", ""))))
+    except ValueError:
+        return crop.MAX_W
+
 MAX_PAGES = 8                      # pages per read_pages call
 MAX_RESULTS = 20
 
@@ -278,7 +288,8 @@ class ViwoodsAPI:
                              "index read it (it misreads handwriting); try another word, or "
                              "viwoods_read_pages for the whole page")
         img = await self.paper.image(pg)
-        shots, spots = await asyncio.to_thread(crop.zoom, img, boxes)
+        everything = crop.find_boxes(boxes_json, [""])              # every word box, for the line widths
+        shots, spots = await asyncio.to_thread(crop.zoom, img, boxes, True, everything, crop_width())
         saved = self._save(nb, n, shots)
         if self.open_image is not None:
             for path in saved:

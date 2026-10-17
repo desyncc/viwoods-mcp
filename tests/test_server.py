@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from viwoods_mcp import crop as crop_mod
 from viwoods_mcp import paper as paper_mod
 from viwoods_mcp import server as V
 from viwoods_mcp.paper import Notebook, Page
@@ -428,3 +429,26 @@ def test_the_show_match_tool_returns_a_caption_with_the_reference_and_the_images
     blocks = blocks if isinstance(blocks, list) else blocks.content
     assert [b.type for b in blocks] == ["text", "image"]
     assert "Health › Meds · p. 1" in blocks[0].text and "outlined in red" in blocks[0].text and "Saved to" in blocks[0].text
+
+
+def test_show_match_gives_the_crop_every_word_box_on_the_page_for_the_line_widths(tmp_path, monkeypatch):
+    seen = {}
+    real = V.crop.zoom
+
+    def spy(img, boxes, mark=True, context=(), max_w=crop_mod.MAX_W):
+        seen["matches"], seen["context"], seen["max_w"] = list(boxes), list(context), max_w
+        return real(img, boxes, mark, context, max_w)
+    monkeypatch.setattr(V.crop, "zoom", spy)
+    run(crop_api(tmp_path).show_match("Meds", 1, "anxious"))
+    assert seen["matches"] == [(270, 100, 500, 160)]
+    assert len(seen["context"]) == len(WORDS)                    # the words that weren't asked for too
+    assert seen["max_w"] == crop_mod.MAX_W
+    monkeypatch.setenv("VIWOODS_MCP_CROP_WIDTH", "900")
+    (tmp_path / "again").mkdir()
+    run(crop_api(tmp_path / "again").show_match("Meds", 1, "anxious"))
+    assert seen["max_w"] == 900
+
+
+def test_the_crop_width_setting_is_clamped_and_a_bad_value_means_the_default():
+    assert V.crop_width("900") == 900 and V.crop_width("100") == 600 and V.crop_width("99999") == 1800
+    assert V.crop_width("wide") == V.crop.MAX_W and V.crop_width("") == V.crop.MAX_W

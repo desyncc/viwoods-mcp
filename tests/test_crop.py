@@ -63,3 +63,42 @@ def test_zoom_enlarges_small_crops_outlines_the_words_and_caps_the_spots():
     shots, found = crop.zoom(img, many)
     assert found == 5 and len(shots) == crop.MAX_CROPS
     assert crop.zoom(img, []) == ([], 0) and crop.zoom(img, [(5000, 5000, 5100, 5100)]) == ([], 0)
+
+
+def test_a_crop_reaches_along_the_lines_it_shows_as_far_as_they_are_written():
+    spot = (700, 1000, 860, 1060)
+    line = [(300, 1000, 440, 1060), (450, 1005, 690, 1065), spot, (1000, 1000, 1150, 1060)]
+    x0, y0, x1, y1 = crop.region(spot, 60, PAGE, line)
+    assert x0 <= 300 and x1 >= 1150                              # the whole line, not just round the word
+    assert x1 - x0 <= crop.MAX_W
+    # words on lines that are not in view don't widen it
+    other = line + [(10, 100, 90, 160), (1700, 2300, 1790, 2360)]
+    assert crop.region(spot, 60, PAGE, other) == (x0, y0, x1, y1)
+    assert crop.region(spot, 60, PAGE) != crop.region(spot, 60, PAGE, line)    # without context: padding only
+
+
+def test_a_line_longer_than_the_width_limit_is_windowed_round_the_words():
+    spot = (1200, 1000, 1360, 1060)
+    line = [(100, 1000, 240, 1060), spot, (1700, 1000, 1790, 1060)]
+    x0, y0, x1, y1 = crop.region(spot, 60, PAGE, line)
+    assert x1 - x0 == crop.MAX_W and x0 <= spot[0] and x1 >= spot[2]
+    edge = (20, 1000, 180, 1060)
+    x0, _, x1, _ = crop.region(edge, 60, PAGE, [edge, (1700, 1000, 1790, 1060)])
+    assert x0 == 0 and 0 < x1 <= crop.MAX_W                       # slid in from the page edge, not off it
+
+
+def test_zoom_uses_the_context_for_the_crop_but_outlines_only_the_matches():
+    img = Image.new("RGB", PAGE, "white")
+    match = [(800, 1200, 940, 1260)]
+    narrow, _ = crop.zoom(img, match)
+    wide, _ = crop.zoom(img, match, context=match + [(100, 1200, 200, 1260), (1500, 1200, 1600, 1260)])
+    assert shot(wide[0]).width >= shot(narrow[0]).width
+    assert reddish(shot(wide[0]))
+
+
+def test_the_width_limit_can_be_set_per_call():
+    spot = (800, 1000, 960, 1060)
+    line = [(100, 1000, 240, 1060), spot, (1650, 1000, 1750, 1060)]
+    wide = crop.region(spot, 60, PAGE, line, max_w=1700)
+    narrow = crop.region(spot, 60, PAGE, line, max_w=900)
+    assert wide[2] - wide[0] > 1500 and narrow[2] - narrow[0] == 900 and narrow[0] <= spot[0] and narrow[2] >= spot[2]

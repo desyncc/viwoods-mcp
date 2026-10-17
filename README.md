@@ -116,6 +116,7 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 | `VIWOODS_MCP_SERIAL` | adb serial, or `host:port` for Wi-Fi |
 | `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` and `viwoods_show_match` |
 | `VIWOODS_MCP_OPEN_IMAGES` | `1` opens each crop from `viwoods_show_match` in your default image viewer. Off by default, so no window appears unasked |
+| `VIWOODS_MCP_CROP_WIDTH` | How wide a `viwoods_show_match` crop may be, in page pixels (600–1800, default 1500). Lines on the tablet run about 1500–1700 px, so wider shows more of the line and narrower zooms in tighter |
 | `VIWOODS_MCP_CROP_DIR` | Where those crops are saved (default `~/.cache/viwoods-mcp/crops`; private to you, the newest 50 are kept) |
 
 ---
@@ -143,7 +144,7 @@ Rules can be edited by hand in the policy file too.
 - **Hidden notebooks stay hidden.** Encrypted, recycle-bin, deleted and PDF-template notebooks never reach the tools.
 - **Not probe-able.** Asking for a notebook that isn't shared gets the same "no shared notebook called…" answer as asking for one that was never there, in `viwoods_read_pages` and in search.
 - **`viwoods_add_pdf_notebook`** uses the app's own PDF import: the PDF is pushed to `/sdcard/Documents/viwoods-mcp/` and has to stay there, because the app keeps its path rather than a copy.
-- **`viwoods_show_match`** finds the words in the word boxes paperd's index stores (`[word, x0, y0, x1, y1]`, in the page image's own pixels), groups them into spots, and crops each with some of the writing around it. Whether the chat window displays the image depends on the Claude app, which is why it's also saved to disk and can be opened for you.
+- **`viwoods_show_match`** finds the words in the word boxes paperd's index stores (`[word, x0, y0, x1, y1]`, in the page image's own pixels), groups them into spots, and crops each with the lines it sits on, as far along as they are written (up to a width limit, so the enlargement stays readable). Whether the chat window displays the image depends on the Claude app, which is why it's also saved to disk and can be opened for you.
 - **`viwoods_search_handwriting`** reads the text paperd's ink index recognised from your pages (the `ink_pages` table in its `index.db`). Without that file it simply returns nothing.
 
 Checked on an AiPaper (SE03) with firmware 3.15.x and Paper app 1.8.9. A different firmware may move things around; the provider authority and the page-file layout are the two places to look.
