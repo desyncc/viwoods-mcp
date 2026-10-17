@@ -61,6 +61,12 @@ class Notebook:
     def written(self) -> list[Page]:
         return [p for p in self.pages if p.written]
 
+    @property
+    def last_changed(self) -> float:
+        """The newest of the notebook's own time and its pages' (the app's own time for the
+        notebook can lag a page written to it, by days)."""
+        return max([self.modified, *(p.modified for p in self.pages)])
+
     def changed(self, page: Page) -> float:
         """When `page` last changed: its own time, or the notebook's if the app gave none."""
         return page.modified or self.modified
@@ -101,7 +107,7 @@ class PaperApp:
             if fresh or not self._books or time.monotonic() - self._at > TTL:
                 self._books = await self._load()
                 self._at = time.monotonic()
-        return sorted(self._books.values(), key=lambda b: b.modified, reverse=True)
+        return sorted(self._books.values(), key=lambda b: b.last_changed, reverse=True)
 
     # -- the two ways to read the tree
     async def _read_provider(self):

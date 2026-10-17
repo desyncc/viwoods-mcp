@@ -92,9 +92,10 @@ def describe(meta: dict) -> str:
 def cite(nb: Notebook, n: int | None = None) -> str:
     """Where something came from, in one form Claude can quote: Folder › Title · p. 3 · changed 2026-04-07."""
     bits = [" › ".join([p for p in nb.folder.split("/") if p] + [nb.title])]
+    page = next((p for p in nb.pages if p.n == n), None) if n else None
     if n:
         bits.append(f"p. {n}")
-    bits.append(f"changed {when(nb.modified)[:10]}")
+    bits.append(f"changed {when(nb.changed(page) if page else nb.last_changed)[:10]}")
     return " · ".join(bits)
 
 
@@ -162,12 +163,12 @@ class ViwoodsAPI:
         rng = TimeRange.of(since, until)
         want = parts(folder)
         out = []
-        for b in sorted(shared, key=lambda b: b.modified, reverse=True):
+        for b in sorted(shared, key=lambda b: b.last_changed, reverse=True):
             if want and parts(b.folder)[:len(want)] != want:
                 continue
             entry = {"id": b.id, "title": b.title, "folder": b.folder,
                      "page_count": len(b.pages), "written_pages": ranges(p.n for p in b.written),
-                     "modified": when(b.modified)}
+                     "modified": when(b.last_changed)}
             if rng:
                 recent = [p.n for p in b.written if b.changed(p) in rng]
                 if not recent:
@@ -394,7 +395,7 @@ def build():
     @srv.tool()
     async def viwoods_list_notebooks(folder: str = "", since: str = "", until: str = "") -> str:
         """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page
-        count, which pages have writing (e.g. "1-3, 5") and when it was last changed. `folder` limits
+        count, which pages have writing (e.g. "1-3, 5") and when anything in it last changed. `folder` limits
         it to a folder and the folders under it. `since` / `until` keep to notebooks with writing
         that changed in that time, and add `pages_changed` (which pages) to each; they take a date
         (2026-10-01, whole day), a date and time, today, yesterday, or how long ago (7d, 2w, 12h, 3m)."""

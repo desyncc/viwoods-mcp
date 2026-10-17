@@ -73,6 +73,7 @@ def test_the_provider_builds_the_tree_and_hides_locked_bin_and_template_notebook
     assert meds.folder == "Health, Care"
     assert [p.n for p in meds.pages] == [1, 2] and [p.written for p in meds.pages] == [True, False]
     assert meds.pages[0].shot == "screenshotBmp_a.png"
+    assert [p.modified for p in meds.pages] == [3.0, 3.0]               # lastModifiedTime is in ms
     assert not any(c.startswith("sqlite3") for c in adb.cmds)           # no root needed
 
 
@@ -122,3 +123,13 @@ def test_when_both_ways_fail_the_error_says_what_the_provider_said_too():
     with pytest.raises(PaperError) as e:
         run(PaperApp(Adb(provider=False, db=None)).notebooks())
     assert "adb root" in str(e.value) and "provider said" in str(e.value)
+
+
+def test_a_notebook_changed_when_its_newest_page_did_even_if_its_own_time_lags():
+    book = paper.Notebook("n", "T", "", modified=100.0)
+    assert book.last_changed == 100.0                                    # no pages: its own time
+    book.pages += [paper.Page(1, "p1", "u", shot="a.png", modified=50.0),
+                   paper.Page(2, "p2", "u", shot="b.png", modified=400.0),
+                   paper.Page(3, "p3", "u", modified=0.0)]
+    assert book.last_changed == 400.0
+    assert book.changed(book.pages[0]) == 50.0 and book.changed(book.pages[2]) == 100.0   # a page with no time: the notebook's

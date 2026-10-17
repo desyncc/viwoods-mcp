@@ -521,3 +521,22 @@ def test_the_search_tool_says_when_nothing_matched_in_the_time(tmp_path, monkeyp
     assert "in that time" not in ask(since="2026-10-01") and "reference" in ask(since="2026-10-01")
     with pytest.raises(Exception, match="can't read"):
         ask(since="sometime")
+
+
+def test_a_notebooks_modified_and_the_list_order_follow_its_newest_page():
+    lagging = timed("x", "Lagging", "Health", [day(12)])
+    lagging.modified = day(1)                                  # the app's own time for it is old
+    steady = timed("y", "Steady", "Health", [day(5)])
+    steady.modified = day(5)
+    out = run(api(Policy(allow=["*"]), [steady, lagging]).notebooks())
+    assert [n["title"] for n in out] == ["Lagging", "Steady"]               # not by the notebook's own time
+    assert abs(datetime.fromisoformat(out[0]["modified"]).timestamp() - day(12)) < 60
+
+
+def test_a_reference_dates_the_page_it_names_and_a_bare_notebook_by_its_newest_page():
+    book = timed("z", "Dated", "Journals", [day(1), day(12)])
+    book.modified = day(1)
+    stamp = lambda t: V.when(t)[:10]
+    assert V.cite(book, 1).endswith(f"p. 1 · changed {stamp(day(1))}")
+    assert V.cite(book, 2).endswith(f"p. 2 · changed {stamp(day(12))}")
+    assert V.cite(book).endswith(f"changed {stamp(day(12))}") and "p." not in V.cite(book)
