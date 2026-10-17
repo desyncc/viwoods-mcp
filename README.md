@@ -26,9 +26,9 @@ viwoods-mcp policy        # what that shares, folder by folder
 | Tool | What it does |
 |---|---|
 | `viwoods_list_folders` | The folders of shared notebooks with counts (with and without their subfolders), and how many notebooks are *not* shared (a number only) |
-| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when it last changed |
+| `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when it last changed. `since` / `until` keep to notebooks with pages changed in that time and say which |
 | `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
-| `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks (needs paperd's index, see below) |
+| `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks, newest page first, optionally limited by `since` / `until` (needs paperd's index, see below) |
 | `viwoods_show_match` | A page zoomed in on where some words are written (up to 3 spots, outlined in red), saved to your PC. Needs paperd's index |
 | `viwoods_add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
 
@@ -118,6 +118,19 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 | `VIWOODS_MCP_OPEN_IMAGES` | `1` opens each crop from `viwoods_show_match` in your default image viewer. Off by default, so no window appears unasked |
 | `VIWOODS_MCP_CROP_WIDTH` | How wide a `viwoods_show_match` crop may be, in page pixels (600–1800, default 1500). Lines on the tablet run about 1500–1700 px, so wider shows more of the line and narrower zooms in tighter |
 | `VIWOODS_MCP_CROP_DIR` | Where those crops are saved (default `~/.cache/viwoods-mcp/crops`; private to you, the newest 50 are kept) |
+
+---
+
+## 🕐 Time filters
+
+`viwoods_list_notebooks` and `viwoods_search_handwriting` take `since` and `until`, so "what did I write this week" or "anxiety in September" doesn't mean reading everything. They go by when each **page** last changed (the notebook's time if the app gave none). A value is any of:
+
+| Value | Means |
+|---|---|
+| `2026-10-01` | that whole day (as `until`, through its end) |
+| `2026-10-01T09:30` | that moment, in this PC's time zone unless it names an offset |
+| `today`, `yesterday` | those days |
+| `7d`, `2w`, `12h`, `3m` | that long ago (`m` is 30-day months) |
 
 ---
 

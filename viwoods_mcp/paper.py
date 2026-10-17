@@ -42,6 +42,7 @@ class Page:
     user: str                  # the app's user folder holding the files
     shot: str | None = None
     ink: str | None = None
+    modified: float = 0.0      # when the page last changed (0 if the app didn't say)
 
     @property
     def written(self) -> bool:
@@ -59,6 +60,10 @@ class Notebook:
     @property
     def written(self) -> list[Page]:
         return [p for p in self.pages if p.written]
+
+    def changed(self, page: Page) -> float:
+        """When `page` last changed: its own time, or the notebook's if the app gave none."""
+        return page.modified or self.modified
 
 
 # run(*adb args) -> stdout bytes
@@ -171,7 +176,8 @@ class PaperApp:
             nb = books[r[1]]
             user, got = r[2], by_page.get(r[0], {})
             there = lambda kind: got.get(kind) if got.get(kind) in have.get(user, ()) else None
-            nb.pages.append(Page(len(nb.pages) + 1, r[0], user, shot=there(SHOT), ink=there(INK)))
+            nb.pages.append(Page(len(nb.pages) + 1, r[0], user, shot=there(SHOT), ink=there(INK),
+                                 modified=r[6] / 1000))
         return books
 
     # -- pictures

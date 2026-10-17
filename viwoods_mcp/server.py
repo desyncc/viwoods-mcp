@@ -29,6 +29,7 @@ from .adb import AdbError, Device
 from .paper import Notebook, PaperApp, PaperError
 from .pdfnote import PdfNoteError
 from .policy import POLICY_FILE, Policy, apply_rule, notebook_path, parts
+from .timerange import TimeRange
 
 # paperd's ink index (optional): viwoods_search_handwriting reads the text it recognised from your pages.
 INDEX = Path(os.environ.get("VIWOODS_MCP_INDEX")
@@ -154,16 +155,25 @@ class ViwoodsAPI:
                 "top_level_notebooks": top,
                 "notebooks_shared": len(shared), "notebooks_not_shared": hidden}
 
-    async def notebooks(self, folder: str = "") -> list[dict]:
+    async def notebooks(self, folder: str = "", since: str = "", until: str = "") -> list[dict]:
+        """Shared notebooks, newest first. With `since` / `until`, only those with a written page that
+        changed in that time, each saying which (`pages_changed`)."""
         shared, _ = await self._split()
+        rng = TimeRange.of(since, until)
         want = parts(folder)
         out = []
         for b in sorted(shared, key=lambda b: b.modified, reverse=True):
             if want and parts(b.folder)[:len(want)] != want:
                 continue
-            out.append({"id": b.id, "title": b.title, "folder": b.folder,
-                        "page_count": len(b.pages), "written_pages": ranges(p.n for p in b.written),
-                        "modified": when(b.modified)})
+            entry = {"id": b.id, "title": b.title, "folder": b.folder,
+                     "page_count": len(b.pages), "written_pages": ranges(p.n for p in b.written),
+                     "modified": when(b.modified)}
+            if rng:
+                recent = [p.n for p in b.written if b.changed(p) in rng]
+                if not recent:
+                    continue
+                entry["pages_changed"] = ranges(recent)
+            out.append(entry)
         return out
 
     async def _find(self, ref: str) -> Notebook:
@@ -205,9 +215,11 @@ class ViwoodsAPI:
                 "not_in_notebook": past_end, "could_not_read": failed,
                 "references": {n: cite(nb, n) for n, _ in out}}, out
 
-    async def search(self, query: str, limit: int = 10) -> dict:
+    async def search(self, query: str, limit: int = 10, since: str = "", until: str = "") -> dict:
         """Hits in shared notebooks, newest first: `results` (at most `limit`), how many there were
-        in all (`total_matches`), and a reference for each."""
+        in all (`total_matches`), and a reference for each. `since` / `until` keep to pages that
+        changed in that time."""
+        rng = TimeRange.of(since, until)
         words = [w for w in query.lower().split() if w][:6]
         empty = {"total_matches": 0, "shown": 0, "results": []}
         if not words or not self.index.exists():
@@ -221,31 +233,34 @@ class ViwoodsAPI:
         # SQLite's own lower() and LIKE fold only ASCII letters, so "Über" would never match "über"
         con.create_function("plower", 1, lambda s: s.lower() if isinstance(s, str) else s,
                             deterministic=True)
-        out, total = [], 0
+        found = []
         try:
             where = " and ".join("plower(text) like ? escape '\\'" for _ in words)
             args = ["%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
                     for w in words]
-            # Newest first, read lazily: rows of notebooks that are not shared are skipped here
-            # (dropped, not counted) so they can't crowd the shared ones out of the limit.
+            # Rows of notebooks that are not shared are skipped here (dropped, not counted) so they
+            # can't crowd the shared ones out of the limit.
             for nb_id, page_id, text in con.execute(
                     f"select nb, page, text from ink_pages where src = 'stock' and "
                     f"status = 'done' and {where} order by ts desc", args):
                 nb = by_id.get(nb_id)
                 if nb is None:
                     continue
-                total += 1
-                if len(out) >= limit:
-                    continue                                 # only counted
                 page = next((p for p in nb.pages if p.id == page_id), None)
-                at = max(0, text.lower().find(words[0]) - 60)
-                snippet = " ".join(text[at:at + 220].split())
-                out.append({"reference": cite(nb, page.n if page else None),
-                            "notebook": nb.title, "notebook_id": nb.id, "folder": nb.folder,
-                            "page": page.n if page else None,
-                            "text": ("…" if at else "") + snippet + ("…" if at + 220 < len(text) else "")})
+                changed = nb.changed(page) if page else nb.modified
+                if not rng or changed in rng:
+                    found.append((changed, nb, page, text))
         finally:
             con.close()
+        found.sort(key=lambda hit: hit[0], reverse=True)      # newest page first (ties: newest read)
+        total, out = len(found), []
+        for changed, nb, page, text in found[:limit]:
+            at = max(0, text.lower().find(words[0]) - 60)
+            snippet = " ".join(text[at:at + 220].split())
+            out.append({"reference": cite(nb, page.n if page else None),
+                        "notebook": nb.title, "notebook_id": nb.id, "folder": nb.folder,
+                        "page": page.n if page else None, "changed": when(changed),
+                        "text": ("…" if at else "") + snippet + ("…" if at + 220 < len(text) else "")})
         result = {"total_matches": total, "shown": len(out), "results": out}
         if total > len(out):
             result["note"] = (f"Showing {len(out)} of {total} matches. Give the user the references "
@@ -338,7 +353,8 @@ INSTRUCTIONS = (
     "`viwoods-mcp allow <folder>`. Notebooks are private writing: answer what was asked, with each "
     "point's `reference` (Folder › Title · p. N) so the user can find the page, and short quotes "
     "rather than long retellings. To show the user where something is written, use "
-    "viwoods_show_match; open whole pages with viwoods_read_pages only when you need to read them.")
+    "viwoods_show_match; open whole pages with viwoods_read_pages only when you need to read them. "
+    "For \"this week\" or \"in September\" questions, use `since` / `until` on the list and search tools.")
 
 server = None            # built in build(), so importing this module needs no mcp install
 _API: ViwoodsAPI | None = None
@@ -376,12 +392,14 @@ def build():
             return json.dumps(await _api().folders(), ensure_ascii=False)
 
     @srv.tool()
-    async def viwoods_list_notebooks(folder: str = "") -> str:
+    async def viwoods_list_notebooks(folder: str = "", since: str = "", until: str = "") -> str:
         """Shared notebooks in the Viwoods tablet's Paper app, newest first: id, title, folder, page
         count, which pages have writing (e.g. "1-3, 5") and when it was last changed. `folder` limits
-        it to a folder and the folders under it."""
+        it to a folder and the folders under it. `since` / `until` keep to notebooks with writing
+        that changed in that time, and add `pages_changed` (which pages) to each; they take a date
+        (2026-10-01, whole day), a date and time, today, yesterday, or how long ago (7d, 2w, 12h, 3m)."""
         with _expected():
-            return json.dumps(await _api().notebooks(folder), ensure_ascii=False)
+            return json.dumps(await _api().notebooks(folder, since, until), ensure_ascii=False)
 
     @srv.tool()
     async def viwoods_read_pages(notebook: str, pages: list[int]) -> list:
@@ -399,20 +417,23 @@ def build():
         return blocks
 
     @srv.tool()
-    async def viwoods_search_handwriting(query: str, limit: int = 10) -> str:
+    async def viwoods_search_handwriting(query: str, limit: int = 10, since: str = "", until: str = "") -> str:
         """Find words in the handwriting of shared Viwoods Paper notebooks: the text paperd's index read
         from the pages (it needs paperd's index file, VIWOODS_MCP_INDEX, and only covers pages it has
-        read). Returns newest first, each hit with a `reference` (Folder › Title · p. N · changed date),
-        the page and a snippet, plus `total_matches` in all. Cite the reference rather than retelling the
-        page; to show the user the spot, use viwoods_show_match."""
+        read). Returns newest page first, each hit with a `reference` (Folder › Title · p. N · changed
+        date), the page and a snippet, plus `total_matches` in all. `since` / `until` keep to pages that
+        changed in that time (a date, date and time, today, yesterday, or how long ago: 7d, 2w, 12h, 3m).
+        Cite the reference rather than retelling the page; to show the user the spot, use
+        viwoods_show_match."""
         api = _api()
         if not api.index.exists():
             raise ToolError(f"The handwriting index isn't there ({api.index}); it comes from paperd. "
                             "Set VIWOODS_MCP_INDEX if it lives somewhere else.")
         with _expected():
-            found = await api.search(query, limit)
+            found = await api.search(query, limit, since, until)
         if not found["results"]:
-            return f"No matches for “{query}” in the shared notebooks' indexed handwriting."
+            return f"No matches for “{query}” in the shared notebooks' indexed handwriting" + (
+                " in that time." if since or until else ".")
         return json.dumps(found, ensure_ascii=False)
 
     @srv.tool()

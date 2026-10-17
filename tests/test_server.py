@@ -452,3 +452,72 @@ def test_show_match_gives_the_crop_every_word_box_on_the_page_for_the_line_width
 def test_the_crop_width_setting_is_clamped_and_a_bad_value_means_the_default():
     assert V.crop_width("900") == 900 and V.crop_width("100") == 600 and V.crop_width("99999") == 1800
     assert V.crop_width("wide") == V.crop.MAX_W and V.crop_width("") == V.crop.MAX_W
+
+
+# ---------------------------------------------------------------- time filters
+
+def day(d, h=12) -> float:
+    return datetime(2026, 10, d, h).astimezone().timestamp()
+
+
+def timed(id, title, folder, times, written=None):
+    """A notebook whose pages changed at `times` (None: the app gave no time for that page)."""
+    book = nb(id, title, folder, pages=len(times), written=written or range(1, len(times) + 1))
+    for page, t in zip(book.pages, times):
+        page.modified = t or 0.0
+    return book
+
+
+TIMED = [timed("a", "Journal", "Journals", [day(1), day(10), day(11)]),
+         timed("b", "Recent", "Health", [day(12)]),
+         timed("c", "Ancient", "Health", [day(1), day(2)]),
+         timed("d", "Untimed", "Health", [None])]
+TIMED[3].modified = day(11)                               # no page time: the notebook's is used
+
+
+def test_list_notebooks_can_be_limited_to_those_with_pages_changed_in_a_time():
+    a = api(Policy(allow=["*"]), TIMED)
+    assert all("pages_changed" not in n for n in run(a.notebooks()))
+    out = {n["title"]: n for n in run(a.notebooks(since="2026-10-09", until="2026-10-12"))}
+    assert set(out) == {"Journal", "Recent", "Untimed"}                        # not Ancient
+    assert out["Journal"]["pages_changed"] == "2-3" and out["Recent"]["pages_changed"] == "1"
+    assert out["Untimed"]["pages_changed"] == "1"                              # falls back to the notebook's time
+    assert {n["title"] for n in run(a.notebooks(since="2026-10-12"))} == {"Recent"}
+    assert {n["title"] for n in run(a.notebooks("Health", until="2026-10-02"))} == {"Ancient"}
+    assert run(a.notebooks(since="2026-11-01")) == []
+    with pytest.raises(ValueError, match="can't read"):
+        run(a.notebooks(since="whenever"))
+
+
+def test_a_time_filter_never_shows_a_notebook_that_is_not_shared():
+    a = api(Policy(allow=["*"], deny=["Journals"]), TIMED)
+    assert "Journal" not in {n["title"] for n in run(a.notebooks(since="2026-10-01"))}
+
+
+def test_search_can_be_limited_to_pages_that_changed_in_a_time_and_lists_the_newest_page_first(tmp_path):
+    rows = [("a", "a-p1", "blue one"), ("a", "a-p2", "blue two"), ("a", "a-p3", "blue three"),
+            ("b", "b-p1", "blue four"), ("c", "c-p1", "blue five")]
+    make_index(tmp_path / "i.db", rows)
+    a = api(Policy(allow=["*"]), TIMED, index=tmp_path / "i.db")
+    everything = run(a.search("blue"))
+    assert [h["page"] for h in everything["results"]] == [1, 3, 2, 1, 1]      # by page time, newest first
+    assert [h["notebook"] for h in everything["results"]][:3] == ["Recent", "Journal", "Journal"]
+    assert datetime.fromisoformat(everything["results"][0]["changed"]).timestamp() - day(12) < 60
+    week = run(a.search("blue", since="2026-10-09"))
+    assert week["total_matches"] == 3 and [h["text"] for h in week["results"]] == ["blue four", "blue three", "blue two"]
+    assert run(a.search("blue", limit=1, since="2026-10-09"))["total_matches"] == 3      # counts what the filter keeps
+    assert run(a.search("blue", since="2026-10-01", until="2026-10-02"))["total_matches"] == 2   # a p1 and c p1
+    assert run(a.search("blue", since="2027-01-01"))["results"] == []
+
+
+def test_the_search_tool_says_when_nothing_matched_in_the_time(tmp_path, monkeypatch):
+    make_index(tmp_path / "i.db", [("a", "a-p1", "blue one")])
+    monkeypatch.setattr(V, "_API", api(Policy(allow=["*"]), TIMED, index=tmp_path / "i.db"))
+    srv = V.build()
+
+    def ask(**kw):
+        return str(run(srv.call_tool("viwoods_search_handwriting", {"query": "blue", **kw})))
+    assert "in that time" in ask(since="2027-01-01")
+    assert "in that time" not in ask(since="2026-10-01") and "reference" in ask(since="2026-10-01")
+    with pytest.raises(Exception, match="can't read"):
+        ask(since="sometime")
