@@ -29,6 +29,7 @@ viwoods-mcp policy        # what that shares, folder by folder
 | `viwoods_list_folders` | The folders of shared notebooks with counts (with and without their subfolders), and how many notebooks are *not* shared (a number only) |
 | `viwoods_list_notebooks` | Shared notebooks: id, title, folder, page count, which pages have writing (as ranges, `1-3, 5`) and when anything in it last changed. `query` finds notebooks by words in the title or folder (no index needed); `since` / `until` keep to notebooks with pages changed in that time and say which |
 | `viwoods_read_pages` | Pages of a shared notebook as images (up to 8 per call) |
+| `viwoods_get_page_text` | The text paperd's index read from pages of a shared notebook (up to 20 per call), with no page images sent. Cheaper than `viwoods_read_pages`, but machine-read, so it misreads. Needs paperd's index |
 | `viwoods_search_handwriting` | Words found in the handwriting of shared notebooks, newest page first, optionally limited by `since` / `until` (needs paperd's index, see below) |
 | `viwoods_show_match` | A page zoomed in on where some words are written (up to 3 spots, outlined in red), saved to your PC. Needs paperd's index |
 | `viwoods_add_pdf_notebook` | A PDF from your PC as a new notebook. Off until `viwoods-mcp write on` |
@@ -115,7 +116,7 @@ Everything lives in one file, `~/.config/viwoods-mcp/policy.json` (or wherever `
 |---|---|
 | `VIWOODS_MCP_POLICY` | Path to the policy file |
 | `VIWOODS_MCP_SERIAL` | adb serial, or `host:port` for Wi-Fi |
-| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting` and `viwoods_show_match` |
+| `VIWOODS_MCP_INDEX` | Path to paperd's `index.db`, for `viwoods_search_handwriting`, `viwoods_get_page_text` and `viwoods_show_match` |
 | `VIWOODS_MCP_AUDIT_LOG` | Where the audit log goes (default `~/.local/state/viwoods-mcp/audit.log`, mode 600, about 1 MB kept plus the previous one). `off` turns it off |
 | `VIWOODS_MCP_OPEN_IMAGES` | `1` opens each crop from `viwoods_show_match` in your default image viewer. Off by default, so no window appears unasked |
 | `VIWOODS_MCP_CROP_WIDTH` | How wide a `viwoods_show_match` crop may be, in page pixels (600–1800, default 1500). Lines on the tablet run about 1500–1700 px, so wider shows more of the line and narrower zooms in tighter |

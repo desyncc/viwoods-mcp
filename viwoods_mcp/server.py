@@ -50,6 +50,7 @@ def crop_width(value: str | None = None) -> int:
 
 MAX_PAGES = 8                      # pages per read_pages call
 MAX_RESULTS = 20
+MAX_TEXT_PAGES = 20                # pages per get_page_text call: text costs far less than images
 
 
 class NotShared(Exception):
@@ -285,6 +286,41 @@ class ViwoodsAPI:
                               "and ask what to look at, or narrow the query.")
         return result
 
+    def _texts_for(self, nb: Notebook, page_ids: list[str]) -> dict[str, str]:
+        """The index's recognised text for these pages of one notebook; pages it hasn't read are absent."""
+        con = sqlite3.connect(f"file:{self.index}?mode=ro", uri=True)
+        try:
+            marks = ",".join("?" for _ in page_ids)
+            rows = con.execute(f"select page, text from ink_pages where src = 'stock' and status = 'done' "
+                               f"and nb = ? and page in ({marks})", (nb.id, *page_ids)).fetchall()
+        finally:
+            con.close()
+        return dict(rows)
+
+    async def page_text(self, notebook: str, pages: list[int]) -> dict:
+        """The text paperd's index read from pages of a shared notebook: no image is fetched from the
+        tablet. Says which pages had no writing, aren't in the notebook, or aren't indexed yet."""
+        nb = await self._find(notebook)
+        wanted = sorted({int(n) for n in pages})
+        if not wanted:
+            raise ValueError("say which page numbers to read (1 = the first page)")
+        if len(wanted) > MAX_TEXT_PAGES:
+            raise ValueError(f"ask for at most {MAX_TEXT_PAGES} pages at a time")
+        if not self.index.exists():
+            raise ValueError("this needs paperd's handwriting index, which isn't there; "
+                             "viwoods_read_pages can still show the pages")
+        by_n = {p.n: p for p in nb.pages}
+        blank = [n for n in wanted if n in by_n and not by_n[n].written]
+        past_end = [n for n in wanted if n not in by_n]
+        written = [by_n[n] for n in wanted if n in by_n and by_n[n].written]
+        texts = await asyncio.to_thread(self._texts_for, nb, [p.id for p in written])
+        out = [{"page": p.n, "reference": cite(nb, p.n), "text": texts[p.id]} for p in written if p.id in texts]
+        missing = [p.n for p in written if p.id not in texts]
+        self.audit.record("page_text", notebook_id=nb.id, title=nb.title, pages=ranges(p["page"] for p in out),
+                          not_indexed=ranges(missing) if missing else "")
+        return {"notebook": nb.title, "page_count": len(nb.pages), "pages": out, "no_writing": blank,
+                "not_in_notebook": past_end, "not_indexed": missing}
+
     def _boxes_for(self, nb: Notebook, page_id: str) -> str | None:
         """The index's word boxes (JSON) for one page, or None if that page isn't indexed."""
         con = sqlite3.connect(f"file:{self.index}?mode=ro", uri=True)
@@ -374,7 +410,8 @@ INSTRUCTIONS = (
     "`viwoods-mcp allow <folder>`. Notebooks are private writing: answer what was asked, with each "
     "point's `reference` (Folder › Title · p. N) so the user can find the page, and short quotes "
     "rather than long retellings. To show the user where something is written, use "
-    "viwoods_show_match; open whole pages with viwoods_read_pages only when you need to read them. "
+    "viwoods_show_match; to read pages, try viwoods_get_page_text first and open images with "
+    "viwoods_read_pages when the text is missing, misread or the page is a drawing. "
     "For \"this week\" or \"in September\" questions, use `since` / `until` on the list and search tools.")
 
 server = None            # built in build(), so importing this module needs no mcp install
@@ -465,6 +502,17 @@ def build():
             return f"No matches for “{query}” in the shared notebooks' indexed handwriting" + (
                 " in that time." if since or until else ".")
         return json.dumps(found, ensure_ascii=False)
+
+    @srv.tool(annotations=reads)
+    async def viwoods_get_page_text(notebook: str, pages: list[int]) -> str:
+        """The text paperd's index read from pages of a shared Viwoods Paper notebook, without sending the
+        page images (cheaper than viwoods_read_pages; at most 20 pages per call). `notebook` is its title or
+        id; `pages` are positions (1 = first). Each page comes with a `reference`; the lists say which
+        pages had no writing, aren't in the notebook, or aren't indexed yet. It is machine-read
+        handwriting and misreads words: for exact wording, a diagram or a drawing, use viwoods_read_pages.
+        Needs paperd's index file (VIWOODS_MCP_INDEX)."""
+        with _expected():
+            return json.dumps(await _api().page_text(notebook, pages), ensure_ascii=False)
 
     @srv.tool(annotations=writes_a_file)
     async def viwoods_show_match(notebook: str, page: int, words: str) -> list:

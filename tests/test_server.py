@@ -336,6 +336,55 @@ def test_the_tools_report_expected_failures_as_errors_with_their_message(monkeyp
         run(srv.call_tool("viwoods_search_handwriting", {"query": "x"}))
 
 
+# ---------------------------------------------------------------- page text from the index
+
+def test_page_text_returns_the_indexed_text_of_written_pages_with_references(tmp_path):
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "take the blue pills at night"),
+                                   ("h1", "h1-p2", "never shown: this page has no writing")])
+    a = api(Policy(allow=["Health"]), index=tmp_path / "i.db")
+    out = run(a.page_text("Meds", [1, 2, 9]))
+    assert [p["page"] for p in out["pages"]] == [1] and out["pages"][0]["text"] == "take the blue pills at night"
+    assert out["pages"][0]["reference"].startswith("Health › Meds · p. 1")
+    assert out["no_writing"] == [2] and out["not_in_notebook"] == [9] and out["not_indexed"] == []
+    assert out["page_count"] == 2
+
+
+def test_page_text_says_which_written_pages_the_index_has_not_read_yet(tmp_path):
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "x")])
+    books = [nb("h1", "Meds", "Health", pages=3, written=(1, 2, 3))]
+    out = run(api(Policy(allow=["Health"]), books, index=tmp_path / "i.db").page_text("Meds", [1, 2, 3]))
+    assert [p["page"] for p in out["pages"]] == [1] and out["not_indexed"] == [2, 3]
+
+
+def test_page_text_of_a_notebook_that_is_not_shared_looks_like_one_that_is_missing(tmp_path):
+    make_index(tmp_path / "i.db", [("j1", "j1-p1", "my secret"), ("h3", "h3-p1", "my other secret")])
+    a = api(Policy(allow=["*"], deny=["Journals", "Health/Private"]), index=tmp_path / "i.db")
+    for ref in ("2026-09-06", "j1", "Private thoughts", "h3"):
+        with pytest.raises(NotShared, match="^no shared notebook called"):
+            run(a.page_text(ref, [1]))
+
+
+def test_page_text_needs_the_index_and_page_numbers_within_the_cap(tmp_path):
+    a = api(Policy(allow=["Health"]), index=tmp_path / "none")
+    with pytest.raises(ValueError, match="index"):
+        run(a.page_text("Meds", [1]))
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "x")])
+    a = api(Policy(allow=["Health"]), index=tmp_path / "i.db")
+    with pytest.raises(ValueError):
+        run(a.page_text("Meds", []))
+    with pytest.raises(ValueError):
+        run(a.page_text("Meds", list(range(1, V.MAX_TEXT_PAGES + 2))))
+
+
+def test_page_text_is_recorded_without_the_text(tmp_path):
+    make_index(tmp_path / "i.db", [("h1", "h1-p1", "my private blue thought")])
+    a, entries = audited(tmp_path, index=tmp_path / "i.db")
+    run(a.page_text("Meds", [1, 2]))
+    (entry,) = entries()
+    assert entry["tool"] == "page_text" and entry["notebook_id"] == "h1" and entry["pages"] == "1"
+    assert "private" not in json.dumps(entry)
+
+
 # ---------------------------------------------------------------- citations, counts and the zoomed crop
 
 def test_a_reference_names_the_folder_notebook_page_and_date():
@@ -548,8 +597,10 @@ def test_a_reference_dates_the_page_it_names_and_a_bare_notebook_by_its_newest_p
 def test_the_tools_say_which_of_them_only_read_and_which_write_something(monkeypatch):
     tools = {t.name: t.annotations for t in run(V.build().list_tools())}
     assert set(tools) == {"viwoods_list_folders", "viwoods_list_notebooks", "viwoods_read_pages",
-                          "viwoods_search_handwriting", "viwoods_show_match", "viwoods_add_pdf_notebook"}
-    for name in ("viwoods_list_folders", "viwoods_list_notebooks", "viwoods_read_pages", "viwoods_search_handwriting"):
+                          "viwoods_search_handwriting", "viwoods_show_match", "viwoods_add_pdf_notebook",
+                          "viwoods_get_page_text"}
+    for name in ("viwoods_list_folders", "viwoods_list_notebooks", "viwoods_read_pages", "viwoods_search_handwriting",
+                 "viwoods_get_page_text"):
         assert tools[name].read_only_hint is True and tools[name].destructive_hint is False, name
     for name in ("viwoods_show_match", "viwoods_add_pdf_notebook"):             # a crop file / a new notebook
         assert tools[name].read_only_hint is False and tools[name].destructive_hint is False, name
