@@ -47,6 +47,15 @@ This server hands someone's private handwriting to a model, so the policy gate i
 3. Raise the expected exceptions (`NotShared`, `PaperError`, …) so `_expected()` turns them into tool errors with a readable message.
 4. Update the tool table and any new env var in `README.md`, and the `INSTRUCTIONS` string in `server.py` if the model needs to know.
 
+## What the Paper app stores (probed on one tablet, Paper app 1.8.9)
+
+Found with `scripts/probe_app.py`; nothing in the code relies on the stroke or text points below.
+
+- **Rows are not pages.** `page_resource` held ~3000 page rows, but only the ~190 written pages have files on the device. The rest are database rows, so count pages through `PaperApp`, never through the provider.
+- **No recognised text on the tablet.** The `resourceType` 8 `.txt` rows have no file, and no table in `NoteDatabase.db` holds text. Text comes from paperd's index, which reads pages with a local Ollama VLM (the tablet's ML Kit garbles handwriting).
+- **Stroke files** (`resourceType` 7, `.json`) are `[x, y, n]` triples: `x, y` in page pixels, listed in `y` order, with `n` the writing order. About a third of pages repeat `n` values, which looks like several layers merged in one file, so cutting them into strokes fails there. Unused for now.
+- **The tablet's shell can be root** (`adb root`), so a probe that works may not work without it. Check before relying on a path for the no-root claim in the README.
+
 ## Working on this repo
 
 - Notebooks are private. Running the server against the real tablet, or calling a `viwoods` MCP tool if one is connected in your session, reads the user's writing: do it only when asked, and prefer fixtures.
